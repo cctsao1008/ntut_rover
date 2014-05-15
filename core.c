@@ -54,73 +54,6 @@ float fast_inv_sqrt(float x) {
 
 #define norm(x, y) fast_inv_sqrt((x)*(x) + (y)*(y))
 
-#define YELLOWONBLUE 1
-#define BLACKONWHITE 2
-#define WHITEONBLACK 3
-
-#define ATTRIBS  WA_BOLD 
-//#define COLORS YELLOWONBLUE
-#define COLORS BLACKONWHITE
-
-bool initColors()
-{
-	if(has_colors())
-	{
-		start_color();
-		init_pair(YELLOWONBLUE ,COLOR_YELLOW, COLOR_BLUE );
-		init_pair(BLACKONWHITE ,COLOR_BLACK ,COLOR_WHITE );
-		init_pair(WHITEONBLACK ,COLOR_WHITE ,COLOR_BLACK );
-		return(true);
-    }
-	else
-		return(false);
-}
-	
-bool setColors(int colorscheme)
-{
-	if(has_colors())
-	{
-		attrset(colorscheme);
-		return(true);
-	}
-	else
-		return(false);
-}
-
-void clrscr(void)
-{
-	int y, x, maxy, maxx;
-	getmaxyx(stdscr, maxy, maxx);
-	for(y=0; y < maxy; y++)
-		for(x=0; x < maxx; x++)
-			mvaddch(y, x, ' ');
-}
-
-void disp_init(void)
-{
-    int row,col;	/* to store the number of rows and *
-					 * the number of colums of the screen */
-
-    initscr(); /* start the curses mode */
-    initColors();
-	attrset(COLOR_PAIR(COLORS) | ATTRIBS);
-	clrscr();
-    box(stdscr, ACS_VLINE, ACS_HLINE); /*draw a box*/
-    curs_set(0); /* Makes the cursor invisible */
-    getmaxyx(stdscr,row,col); /* get the number of rows and columns */
-    start_color(); /* Be sure not to forget this, it will enable colors */
-    init_pair(1, COLOR_RED, COLOR_CYAN); /* You can make as much color pairs as you want, be sure to change the ID number */
-    init_pair(2, COLOR_YELLOW, COLOR_GREEN);
-    attron(A_UNDERLINE | COLOR_PAIR(1)); /* This turns on the underlined text and color pair 1 */
-    //printw("This is underlined red text with cyan background\n");
-    attroff(A_UNDERLINE | COLOR_PAIR(1));
-    attron(A_BOLD | COLOR_PAIR(2));
-    //printw("This is bold yellow text with green background");
-    attroff(A_BOLD | COLOR_PAIR(2));
-    //move(LINES/2, COLS/2); /*move the cursor to the center*/
-    refresh();
-}
-
 /*
 
   This routine calculates the distance between two points (given the
@@ -195,7 +128,7 @@ waypoint wp[2] =
 
 typedef struct _fifo
 {
-    float*  buf;
+    float*  data;
     uint8_t size;
     uint8_t index;
 }fifo;
@@ -206,7 +139,6 @@ fifo* buffer_create(float data, uint8_t size)
 {
     fifo* _fifo = NULL;
     float* _buf = NULL;
-    uint8_t i;
 
     _fifo = calloc(1, sizeof(fifo));
 
@@ -216,7 +148,7 @@ fifo* buffer_create(float data, uint8_t size)
 
         if(NULL != _buf)
         {
-            _fifo->buf = _buf;
+            _fifo->data = _buf;
             _fifo->size = size;
             _fifo->index = 0;
 
@@ -228,13 +160,6 @@ fifo* buffer_create(float data, uint8_t size)
             fprintf(stderr, "buffer = null!\r\n");
             exit(EXIT_SUCCESS);
         }
-
-        //fprintf(stderr, "data = %f\r\n", data);
-
-        //for(i = 0; i < size ; i++)
-        //    fprintf(stderr, "buf[%d] = %f\r\n", i, _buf[i]);
-
-        //usleep(3000000);
     }
 
     return _fifo;
@@ -242,7 +167,7 @@ fifo* buffer_create(float data, uint8_t size)
 
 void buffer_add(fifo* _fifo, float _data)
 {
-    _fifo->buf[_fifo->index] = _data;
+    _fifo->data[_fifo->index] = _data;
 
     if(((++(_fifo->index)) % (_fifo->size)) == 0)
         _fifo->index = 0;
@@ -266,7 +191,7 @@ void filter_update(data_filter* _filter)
     sum = 0;
     for(i = 0 ; i < (_filter->buf->size) ; i++)
     {
-        sum = sum + _filter->buf->buf[i];
+        sum = sum + _filter->buf->data[i];
     }
 
     _filter->avg = sum / (_filter->buf->size);
@@ -275,7 +200,21 @@ void filter_update(data_filter* _filter)
     sum = 0;
     for(i = 0 ; i < (_filter->buf->size) ; i++)
     {
-        sum = sum + (_filter->buf->buf[i] - _filter->avg)*(_filter->buf->buf[i] - _filter->avg);
+        sum = sum + (_filter->buf->data[i] - _filter->avg)*(_filter->buf->data[i] - _filter->avg);
+    }
+
+    /* Find the maximum value of buffer */
+    _filter->max = _filter->buf->data[0];
+    for(i = 0 ; i < (_filter->buf->size) ; i++)
+    {
+        _filter->max = max(_filter->max, _filter->buf->data[i]);
+    }
+
+    /* Find the  minimum value of buffer */
+    _filter->min = _filter->buf->data[0];
+    for(i = 0 ; i < (_filter->buf->size) ; i++)
+    {
+        _filter->min = min(_filter->min, _filter->buf->data[i]);
     }
 
     _filter->sd = sqrt((sum / (_filter->buf->size)));
@@ -303,183 +242,193 @@ data_filter* filter_create(fifo* _fifo)
     return _filter;
 }
 
+fifo* lat_buf;
+fifo* lon_buf;
+data_filter* lat_filter;
+data_filter* lon_filter;
+float _distance = 0, _direction = 0;
+float lat_max, lat_min, lon_max, lon_min;
+float sum_lat = 0, buff_lat[MA_N] = {0}, sum_lon = 0, buff_lon[MA_N] = {0};
+
+struct gps_data_t _gps_data;
+
+
+#define YELLOWONBLUE 1
+#define BLACKONWHITE 2
+#define WHITEONBLACK 3
+
+#define ATTRIBS  WA_BOLD 
+//#define COLORS YELLOWONBLUE
+#define COLORS BLACKONWHITE
+
+bool initColors()
+{
+	if(has_colors())
+	{
+		start_color();
+		init_pair(YELLOWONBLUE ,COLOR_YELLOW, COLOR_BLUE );
+		init_pair(BLACKONWHITE ,COLOR_BLACK ,COLOR_WHITE );
+		init_pair(WHITEONBLACK ,COLOR_WHITE ,COLOR_BLACK );
+		return(true);
+    }
+	else
+		return(false);
+}
+	
+bool setColors(int colorscheme)
+{
+	if(has_colors())
+	{
+		attrset(colorscheme);
+		return(true);
+	}
+	else
+		return(false);
+}
+
+void clrscr(void)
+{
+	int y, x, maxy, maxx;
+	getmaxyx(stdscr, maxy, maxx);
+	for(y=0; y < maxy; y++)
+		for(x=0; x < maxx; x++)
+			mvaddch(y, x, ' ');
+}
+
+void disp_init(void)
+{
+    #if 0
+    int row,col;	/* to store the number of rows and *
+					 * the number of colums of the screen */
+    #endif
+
+    initscr(); /* start the curses mode */
+    initColors();
+	attrset(COLOR_PAIR(COLORS) | ATTRIBS);
+	clrscr();
+    box(stdscr, ACS_VLINE, ACS_HLINE); /*draw a box*/
+    curs_set(0); /* Makes the cursor invisible */
+    #if 0
+    getmaxyx(stdscr,row,col); /* get the number of rows and columns */
+    #endif
+    start_color(); /* Be sure not to forget this, it will enable colors */
+    init_pair(1, COLOR_RED, COLOR_CYAN); /* You can make as much color pairs as you want, be sure to change the ID number */
+    init_pair(2, COLOR_YELLOW, COLOR_GREEN);
+    attron(A_UNDERLINE | COLOR_PAIR(1)); /* This turns on the underlined text and color pair 1 */
+    //printw("This is underlined red text with cyan background\n");
+    attroff(A_UNDERLINE | COLOR_PAIR(1));
+    attron(A_BOLD | COLOR_PAIR(2));
+    //printw("This is bold yellow text with green background");
+    attroff(A_BOLD | COLOR_PAIR(2));
+    //move(LINES/2, COLS/2); /*move the cursor to the center*/
+    refresh();
+}
+
+void disp_update(int row, int col)
+{
+    int row_disp = row;
+                     
+    erase();
+    attrset(COLOR_PAIR(COLORS) | ATTRIBS);
+    clrscr();
+    box(stdscr, ACS_VLINE, ACS_HLINE); /*draw a box*/
+
+    mvprintw(row_disp++, col, "-------------------------------------------------------------");
+    mvprintw(row_disp++, col, "GPS(Global Positioning System) informations that got from");
+    mvprintw(row_disp++, col, "GPSd(a GPS service daemon)");
+    mvprintw(row_disp++, col, "-------------------------------------------------------------");
+    mvprintw(row_disp++, col, "gps_data.status= %d", _gps_data.status);
+    mvprintw(row_disp++, col, "gps_data.fix.track= %f", _gps_data.fix.track);
+    mvprintw(row_disp++, col, "gps_data.fix.speed= %f", _gps_data.fix.speed);
+    mvprintw(row_disp++, col, "gps_data.fix.latitude = %f", _gps_data.fix.latitude);
+    mvprintw(row_disp++, col, "gps_data.fix.longitude = %f", _gps_data.fix.longitude);
+    mvprintw(row_disp++, col, "lat_max = %f", lat_max);
+    //mvprintw((row_disp++, col, "lat_min = %f", lat_min);
+    mvprintw(row_disp++, col, "lon_max = %f", lon_max);
+    //mvprintw((row_disp++, col, "lon_min = %f", lon_min);
+    mvprintw(row_disp++, col, "lat_filter->avg = %f", lat_filter->avg);
+    mvprintw(row_disp++, col, "lat_filter->sd = %f", lat_filter->sd);
+    mvprintw(row_disp++, col, "lat_filter->max = %f", lat_filter->max);
+    mvprintw(row_disp++, col, "lat_filter->min = %f", lat_filter->min);
+    mvprintw(row_disp++, col, "lon_filter->avg = %f", lon_filter->avg);
+    mvprintw(row_disp++, col, "lon_filter->sd = %f", lon_filter->sd);
+    mvprintw(row_disp++, col, "lon_filter->max = %f", lon_filter->max);
+    mvprintw(row_disp++, col, "lon_filter->min = %f", lon_filter->min);
+    mvprintw(row_disp++, col, "-------------------------------------------------------------");
+    mvprintw(row_disp++, col, "local way poipn to the way point in the sports field of NTUT");
+    mvprintw(row_disp++, col, "-------------------------------------------------------------");
+    mvprintw(row_disp++, col, "distance = %f m", _distance*1000);
+    mvprintw(row_disp++, col, "direction = %f deg", _direction*180/M_PI);
+    mvprintw(row_disp++, col, "unit(%f,%f)", _gps_data.fix.latitude * norm(_gps_data.fix.latitude, _gps_data.fix.longitude),
+                                             _gps_data.fix.longitude * norm(_gps_data.fix.latitude, _gps_data.fix.longitude));
+    mvprintw(row_disp++, col, "-------------------------------------------------------------");
+    refresh();
+}
 
 int main(int argc, char *argv[])
 {
-    static struct gps_data_t gps_data;
-    int row = 1, row_info = 3;
-
-    int i, count = 0, initialized = 0;
-    float sum_lat = 0, buff_lat[MA_N] = {0}, sum_lon = 0, buff_lon[MA_N] = {0};
-    //float target[2] = {25.042583, 121.537674}; // 25.042583N, 121.537674E
-
-    float _distance = 0, _direction = 0;
-    float lat_max, lat_min, lat_sd, lon_max, lon_min, lon_sd;
-
-    fifo* lat_buf;
-    fifo* lon_buf;
-    data_filter* lat_filter;
-    data_filter* lon_filter;
+    int row = 1, col = 3;
 
     disp_init();
 
-    //fprintf(stderr, "ntut-rover example code\r\n");
-    // collect gps data
+    /* collect gps data */
     if (gps_start() == 0)
     {
-        //printf("gpsd connection esthablished, collecting gps data\r\n");
-        mvprintw(row++, 3, "gpsd connection esthablished, collecting gps data");
+        mvprintw(row++, col, "gpsd connection esthablished, collecting gps data");
     }
     else
     {
-        mvprintw(row++, 3, "gps data not available");
-        //fprintf(stderr, "gps data not available\r\n");
+        mvprintw(row++, col, "gps data not available");
         exit(EXIT_FAILURE);
     }
 
     refresh();
 
+    /* Latitude */
+    lat_buf = buffer_create(_gps_data.fix.latitude, MA_N);
+
+    if(NULL == lat_buf)
+    {
+        exit(EXIT_SUCCESS);
+    }
+
+    lat_filter = filter_create(lat_buf);
+
+    /* Longitude */
+    lon_buf = buffer_create(_gps_data.fix.longitude, MA_N);
+
+    if(NULL == lon_buf)
+    {
+        exit(EXIT_SUCCESS);
+    }
+
+    lon_filter = filter_create(lon_buf);
+
     for(;;)
     {
-        if (get_gps_data(&gps_data) == 0)
+        if (get_gps_data(&_gps_data) == 0)
         {
-            //printf("gps.mode = %f\n",(double) gps.mode);
-            if(gps_data.fix.mode != MODE_NO_FIX) // Wait for GPS Fix
-            {
-                #if 0
-                fprintf(stderr, "gps_data.fix.track= %f\r\n", gps_data.fix.track);
-                fprintf(stderr, "gps_data.fix.speed= %f\r\n", gps_data.fix.speed);
-                fprintf(stderr, "gps_data.fix.latitude = %f\r\n", gps_data.fix.latitude);
-                fprintf(stderr, "gps_data.fix.longitude = %f\r\n", gps_data.fix.longitude);
-                #else
+            buffer_add(lat_buf, _gps_data.fix.latitude);
+            filter_update(lat_filter);
 
-                #if 0
-                while((initialized != 1) && (count < MA_N)
-                {
-                    buff_lat[count] = gps_data.fix.latitude;
-                    buff_lon[count] = gps_data.fix.longitude;
+            buffer_add(lon_buf, _gps_data.fix.longitude);
+            filter_update(lon_filter);
 
-                    if(((++count) % MA_N) == 0)
-                        count = 0;
+            _distance = distance(_gps_data.fix.latitude, _gps_data.fix.longitude, wp[0].lat, wp[0].lon, 'K');
 
-                    usleep(100000);
+            /* This is a simple approach due to a small distance */
+            _direction = atan2((wp[0].lat - _gps_data.fix.latitude), (wp[0].lon - _gps_data.fix.longitude));
 
-                    if(!(count < MA_N))
-                        initialized = 1;
+            lat_max = max(lat_max, _gps_data.fix.latitude);
+            lon_max = max(lon_max, _gps_data.fix.longitude);
 
-                    while(get_gps_data(&gps_data) =! 0);
-                }
-                #endif
-
-                if(initialized != 1)
-                {
-                    //while((gps_data.fix.latitude == NAN) || (gps_data.fix.longitude == NAN))
-                    //    get_gps_data(&gps_data);
-  
-                    mvprintw(row++, 3, "initialized!");refresh();
-                    /* lat */
-                    lat_buf = buffer_create(gps_data.fix.latitude, MA_N);
-
-                    if(NULL == lat_buf)
-                    {
-                        mvprintw(row++, 3, "lat_buf create failed!");refresh();
-                        exit(EXIT_SUCCESS);
-                    }
-
-                    lat_filter = filter_create(lat_buf);
-
-                    /* lon */
-                    lon_buf = buffer_create(gps_data.fix.longitude, MA_N);
-
-                    if(NULL == lon_buf)
-                    {
-                        mvprintw(row++, 3, "lon_buf create failed!");refresh();
-                        exit(EXIT_SUCCESS);
-                    }
-
-                    lon_filter = filter_create(lon_buf);
-
-                    /* Finished */
-                    initialized = 1;
-                }
-
-                buffer_add(lat_buf, gps_data.fix.latitude);
-                filter_update(lat_filter);
-
-                buffer_add(lon_buf, gps_data.fix.longitude);
-                filter_update(lon_filter);
-
-                buff_lat[count] = gps_data.fix.latitude;
-                buff_lon[count] = gps_data.fix.longitude;
-
-                if(((++count) % MA_N) == 0)
-                    count = 0;
-
-                sum_lat = 0; sum_lon = 0;
-
-                for(i = 0 ; i < MA_N ; i++)
-                {
-                    sum_lat = sum_lat + buff_lat[i];
-                    sum_lon = sum_lon + buff_lon[i];
-                }
-
-                sum_lat = sum_lat / MA_N;
-                sum_lon = sum_lon / MA_N;
-
-                //length = sqrt(pow((target[0] - sum_lat),2) + pow((target[1] - sum_lon),2));
-                _distance = distance(sum_lat, sum_lon, wp[0].lat, wp[0].lon, 'K');
-
-                /* This is a simple approach due to a small distance */
-                _direction = atan2((wp[0].lat - sum_lat), (wp[0].lon - sum_lon));
-
-                lat_max = max(lat_max, gps_data.fix.latitude);
-                //lat_min = min(sum_lat, gps_data.fix.latitude);
-                lon_max = max(lon_max, gps_data.fix.longitude);
-                //lon_min = min(sum_lon, gps_data.fix.longitude);
-    
-                row_info = row;
-                 
-                erase();
-                attrset(COLOR_PAIR(COLORS) | ATTRIBS);
-                clrscr();
-                box(stdscr, ACS_VLINE, ACS_HLINE); /*draw a box*/
-
-                mvprintw(row_info++, 3, "-------------------------------------------------------------");
-                mvprintw(row_info++, 3, "GPS(Global Positioning System) informations that got from");
-                mvprintw(row_info++, 3, "GPSd(a GPS service daemon)");
-                mvprintw(row_info++, 3, "-------------------------------------------------------------");
-                mvprintw(row_info++, 3, "gps_data.status= %d", gps_data.status);
-                mvprintw(row_info++, 3, "gps_data.fix.track= %f", gps_data.fix.track);
-                mvprintw(row_info++, 3, "gps_data.fix.speed= %f", gps_data.fix.speed);
-                mvprintw(row_info++, 3, "gps_data.fix.latitude = %f", gps_data.fix.latitude);
-                mvprintw(row_info++, 3, "gps_data.fix.latitude (avg) = %f", sum_lat);
-                mvprintw(row_info++, 3, "gps_data.fix.longitude = %f", gps_data.fix.longitude);
-                mvprintw(row_info++, 3, "gps_data.fix.longitude (avg) = %f", sum_lon);
-                //mvprintw((row + 6), 3, "vector = %f(%f)", length, degree);
-                mvprintw(row_info++, 3, "lat_max = %f", lat_max);
-                //mvprintw(row_info++, 3, "lat_min = %f", lat_min);
-                mvprintw(row_info++, 3, "lon_max = %f", lon_max);
-                //mvprintw(row_info++, 3, "lon_min = %f", lon_min);
-                mvprintw(row_info++, 3, "lat_filter->avg = %f", lat_filter->avg);
-                mvprintw(row_info++, 3, "lat_filter->sd = %f", lat_filter->sd);
-                mvprintw(row_info++, 3, "lon_filter->avg = %f", lon_filter->avg);
-                mvprintw(row_info++, 3, "lon_filter->sd = %f", lon_filter->sd);
-                mvprintw(row_info++, 3, "-------------------------------------------------------------");
-                mvprintw(row_info++, 3, "local way poipn to the way point in the sports field of NTUT");
-                mvprintw(row_info++, 3, "-------------------------------------------------------------");
-                mvprintw(row_info++, 3, "distance = %f m", _distance*1000);
-                mvprintw(row_info++, 3, "direction = %f deg", _direction*180/M_PI);
-                mvprintw(row_info++, 3, "unit(%f,%f)", gps_data.fix.latitude * norm(gps_data.fix.latitude, gps_data.fix.longitude),
-                                                       gps_data.fix.longitude * norm(gps_data.fix.latitude, gps_data.fix.longitude));
-                mvprintw(row_info++, 3, "-------------------------------------------------------------");
-                refresh();
-                #endif
-            }
+            disp_update(row, 3);
         }
 
-        usleep(100000);
+        usleep(50000);
 
     }
 
     exit(EXIT_SUCCESS);
 }
+
