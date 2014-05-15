@@ -148,14 +148,14 @@ void disp_init(void)
 
 */
 
-#define PI 3.14159265358979323846
+//#define PI 3.14159265358979323846
 
 double deg2rad(double deg) {
-  return (deg * PI / 180);
+  return (deg * M_PI / 180);
 }
 
 double rad2deg(double rad) {
-  return (rad * 180 / PI);
+  return (rad * 180 / M_PI);
 }
 
 // dist = arccos(sin(lat1) ¡P sin(lat2) + cos(lat1) ¡P cos(lat2) ¡P cos(lon1 - lon2)) ¡P R
@@ -180,7 +180,7 @@ double distance(double lat1, double lon1, double lat2, double lon2, char unit) {
   return (dist);
 }
 
-#define LFP 8
+#define MA_N 20
 waypoint wp[2] = 
 {
     [0] = {
@@ -193,17 +193,133 @@ waypoint wp[2] =
 #define max(a,b) (a>b?a:b)
 #define min(a,b) (a<b?a:b)
 
+typedef struct _fifo
+{
+    float*  buf;
+    uint8_t size;
+    uint8_t index;
+}fifo;
+
+#define HANDLE void*
+
+fifo* buffer_create(float data, uint8_t size)
+{
+    fifo* _fifo = NULL;
+    float* _buf = NULL;
+    uint8_t i;
+
+    _fifo = calloc(1, sizeof(fifo));
+
+    if(NULL != _fifo)
+    {
+        _buf = malloc(size * sizeof(float));
+
+        if(NULL != _buf)
+        {
+            _fifo->buf = _buf;
+            _fifo->size = size;
+            _fifo->index = 0;
+
+            memset(_buf, data, size);
+        }
+        else
+        {
+            free(_fifo);
+            fprintf(stderr, "buffer = null!\r\n");
+            exit(EXIT_SUCCESS);
+        }
+
+        //fprintf(stderr, "data = %f\r\n", data);
+
+        //for(i = 0; i < size ; i++)
+        //    fprintf(stderr, "buf[%d] = %f\r\n", i, _buf[i]);
+
+        //usleep(3000000);
+    }
+
+    return _fifo;
+}
+
+void buffer_add(fifo* _fifo, float _data)
+{
+    _fifo->buf[_fifo->index] = _data;
+
+    if(((++(_fifo->index)) % (_fifo->size)) == 0)
+        _fifo->index = 0;
+}
+
+typedef struct _filter
+{
+    fifo*   buf;
+    float  avg; /* Average */
+    float  sd; /* Standard Deviation */
+    float  max;
+    float  min;
+}data_filter;
+
+void filter_update(data_filter* _filter)
+{
+    float sum;
+    uint8_t i;
+
+    /* Calculate average */
+    sum = 0;
+    for(i = 0 ; i < (_filter->buf->size) ; i++)
+    {
+        sum = sum + _filter->buf->buf[i];
+    }
+
+    _filter->avg = sum / (_filter->buf->size);
+
+    /* Calculate standard deviation */
+    sum = 0;
+    for(i = 0 ; i < (_filter->buf->size) ; i++)
+    {
+        sum = sum + (_filter->buf->buf[i] - _filter->avg)*(_filter->buf->buf[i] - _filter->avg);
+    }
+
+    _filter->sd = sqrt((sum / (_filter->buf->size)));
+}
+
+data_filter* filter_create(fifo* _fifo)
+{
+    data_filter* _filter;
+
+    _filter = calloc(1, sizeof(data_filter));
+
+    if(NULL != _filter)
+    {
+        if(NULL != _fifo)
+            _filter->buf = _fifo;
+        else
+        {
+            fprintf(stderr, "fifo = null!");
+            exit(EXIT_SUCCESS);
+        }
+
+        filter_update(_filter);
+    }
+
+    return _filter;
+}
+
+
 int main(int argc, char *argv[])
 {
     static struct gps_data_t gps_data;
     int row = 1, row_info = 3;
 
-    int i, count = 0;
-    float sum_lat = 0, buff_lat[LFP] = {0}, sum_lon = 0, buff_lon[LFP] = {0};
+    int i, count = 0, initialized = 0;
+    float sum_lat = 0, buff_lat[MA_N] = {0}, sum_lon = 0, buff_lon[MA_N] = {0};
     //float target[2] = {25.042583, 121.537674}; // 25.042583N, 121.537674E
 
     float _distance = 0, _direction = 0;
-    float lat_max, lat_min, lon_max, lon_min; 
+    float lat_max, lat_min, lat_sd, lon_max, lon_min, lon_sd;
+
+    fifo* lat_buf;
+    fifo* lon_buf;
+    data_filter* lat_filter;
+    data_filter* lon_filter;
 
     disp_init();
 
@@ -228,7 +344,7 @@ int main(int argc, char *argv[])
         if (get_gps_data(&gps_data) == 0)
         {
             //printf("gps.mode = %f\n",(double) gps.mode);
-            if(gps_data.fix.mode == MODE_3D) // Wait for GPS Fix
+            if(gps_data.fix.mode != MODE_NO_FIX) // Wait for GPS Fix
             {
                 #if 0
                 fprintf(stderr, "gps_data.fix.track= %f\r\n", gps_data.fix.track);
@@ -237,22 +353,78 @@ int main(int argc, char *argv[])
                 fprintf(stderr, "gps_data.fix.longitude = %f\r\n", gps_data.fix.longitude);
                 #else
 
+                #if 0
+                while((initialized != 1) && (count < MA_N)
+                {
+                    buff_lat[count] = gps_data.fix.latitude;
+                    buff_lon[count] = gps_data.fix.longitude;
+
+                    if(((++count) % MA_N) == 0)
+                        count = 0;
+
+                    usleep(100000);
+
+                    if(!(count < MA_N))
+                        initialized = 1;
+
+                    while(get_gps_data(&gps_data) =! 0);
+                }
+                #endif
+
+                if(initialized != 1)
+                {
+                    //while((gps_data.fix.latitude == NAN) || (gps_data.fix.longitude == NAN))
+                    //    get_gps_data(&gps_data);
+  
+                    mvprintw(row++, 3, "initialized!");refresh();
+                    /* lat */
+                    lat_buf = buffer_create(gps_data.fix.latitude, MA_N);
+
+                    if(NULL == lat_buf)
+                    {
+                        mvprintw(row++, 3, "lat_buf create failed!");refresh();
+                        exit(EXIT_SUCCESS);
+                    }
+
+                    lat_filter = filter_create(lat_buf);
+
+                    /* lon */
+                    lon_buf = buffer_create(gps_data.fix.longitude, MA_N);
+
+                    if(NULL == lon_buf)
+                    {
+                        mvprintw(row++, 3, "lon_buf create failed!");refresh();
+                        exit(EXIT_SUCCESS);
+                    }
+
+                    lon_filter = filter_create(lon_buf);
+
+                    /* Finished */
+                    initialized = 1;
+                }
+
+                buffer_add(lat_buf, gps_data.fix.latitude);
+                filter_update(lat_filter);
+
+                buffer_add(lon_buf, gps_data.fix.longitude);
+                filter_update(lon_filter);
+
                 buff_lat[count] = gps_data.fix.latitude;
                 buff_lon[count] = gps_data.fix.longitude;
 
-                if(((++count) % LFP) == 0)
+                if(((++count) % MA_N) == 0)
                     count = 0;
 
                 sum_lat = 0; sum_lon = 0;
 
-                for(i = 0 ; i < LFP ; i++)
+                for(i = 0 ; i < MA_N ; i++)
                 {
                     sum_lat = sum_lat + buff_lat[i];
                     sum_lon = sum_lon + buff_lon[i];
                 }
 
-                sum_lat = sum_lat / LFP;
-                sum_lon = sum_lon / LFP;
+                sum_lat = sum_lat / MA_N;
+                sum_lon = sum_lon / MA_N;
 
                 //length = sqrt(pow((target[0] - sum_lat),2) + pow((target[1] - sum_lon),2));
                 _distance = distance(sum_lat, sum_lon, wp[0].lat, wp[0].lon, 'K');
@@ -288,11 +460,15 @@ int main(int argc, char *argv[])
                 //mvprintw(row_info++, 3, "lat_min = %f", lat_min);
                 mvprintw(row_info++, 3, "lon_max = %f", lon_max);
                 //mvprintw(row_info++, 3, "lon_min = %f", lon_min);
+                mvprintw(row_info++, 3, "lat_filter->avg = %f", lat_filter->avg);
+                mvprintw(row_info++, 3, "lat_filter->sd = %f", lat_filter->sd);
+                mvprintw(row_info++, 3, "lon_filter->avg = %f", lon_filter->avg);
+                mvprintw(row_info++, 3, "lon_filter->sd = %f", lon_filter->sd);
                 mvprintw(row_info++, 3, "-------------------------------------------------------------");
                 mvprintw(row_info++, 3, "local way poipn to the way point in the sports field of NTUT");
                 mvprintw(row_info++, 3, "-------------------------------------------------------------");
                 mvprintw(row_info++, 3, "distance = %f m", _distance*1000);
-                mvprintw(row_info++, 3, "direction = %f deg", _direction*180/PI);
+                mvprintw(row_info++, 3, "direction = %f deg", _direction*180/M_PI);
                 mvprintw(row_info++, 3, "unit(%f,%f)", gps_data.fix.latitude * norm(gps_data.fix.latitude, gps_data.fix.longitude),
                                                        gps_data.fix.longitude * norm(gps_data.fix.latitude, gps_data.fix.longitude));
                 mvprintw(row_info++, 3, "-------------------------------------------------------------");

@@ -1,5 +1,5 @@
 CC=gcc
-CC_OPTIONS=-Wall -lgps -lncurses -lwiringPi
+CC_OPTIONS=-Wall -lgps -lncurses -lwiringPi -lpthread
 
 ntut-rover : core
 
