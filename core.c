@@ -152,7 +152,7 @@ fifo* buffer_create(float data, uint8_t size)
             _fifo->size = size;
             _fifo->index = 0;
 
-            memset(_buf, data, size);
+            memset(_buf, data, size * sizeof(float));
         }
         else
         {
@@ -184,8 +184,8 @@ typedef struct _filter
 
 void filter_update(data_filter* _filter)
 {
-    float sum;
-    uint8_t i;
+    float sum = 0;
+    uint8_t i = 0;
 
     /* Calculate average */
     sum = 0;
@@ -203,6 +203,8 @@ void filter_update(data_filter* _filter)
         sum = sum + (_filter->buf->data[i] - _filter->avg)*(_filter->buf->data[i] - _filter->avg);
     }
 
+    _filter->sd = sqrtf((sum / (_filter->buf->size)));
+
     /* Find the maximum value of buffer */
     _filter->max = _filter->buf->data[0];
     for(i = 0 ; i < (_filter->buf->size) ; i++)
@@ -216,8 +218,6 @@ void filter_update(data_filter* _filter)
     {
         _filter->min = min(_filter->min, _filter->buf->data[i]);
     }
-
-    _filter->sd = sqrt((sum / (_filter->buf->size)));
 }
 
 data_filter* filter_create(fifo* _fifo)
@@ -324,6 +324,7 @@ void disp_init(void)
     refresh();
 }
 
+#define KM2M 1000
 void disp_update(int row, int col)
 {
     int row_disp = row;
@@ -334,18 +335,17 @@ void disp_update(int row, int col)
     box(stdscr, ACS_VLINE, ACS_HLINE); /*draw a box*/
 
     mvprintw(row_disp++, col, "-------------------------------------------------------------");
-    mvprintw(row_disp++, col, "GPS(Global Positioning System) informations that got from");
-    mvprintw(row_disp++, col, "GPSd(a GPS service daemon)");
+    mvprintw(row_disp++, col, "GPS(Global Positioning System) informations that got from    ");
+    mvprintw(row_disp++, col, "GPSd(a GPS service daemon)                                   ");
     mvprintw(row_disp++, col, "-------------------------------------------------------------");
     mvprintw(row_disp++, col, "gps_data.status= %d", _gps_data.status);
     mvprintw(row_disp++, col, "gps_data.fix.track= %f", _gps_data.fix.track);
     mvprintw(row_disp++, col, "gps_data.fix.speed= %f", _gps_data.fix.speed);
     mvprintw(row_disp++, col, "gps_data.fix.latitude = %f", _gps_data.fix.latitude);
     mvprintw(row_disp++, col, "gps_data.fix.longitude = %f", _gps_data.fix.longitude);
-    mvprintw(row_disp++, col, "lat_max = %f", lat_max);
-    //mvprintw((row_disp++, col, "lat_min = %f", lat_min);
-    mvprintw(row_disp++, col, "lon_max = %f", lon_max);
-    //mvprintw((row_disp++, col, "lon_min = %f", lon_min);
+    mvprintw(row_disp++, col, "-------------------------------------------------------------");
+    mvprintw(row_disp++, col, "Filter Informations                                          ");
+    mvprintw(row_disp++, col, "-------------------------------------------------------------");
     mvprintw(row_disp++, col, "lat_filter->avg = %f", lat_filter->avg);
     mvprintw(row_disp++, col, "lat_filter->sd = %f", lat_filter->sd);
     mvprintw(row_disp++, col, "lat_filter->max = %f", lat_filter->max);
@@ -355,9 +355,9 @@ void disp_update(int row, int col)
     mvprintw(row_disp++, col, "lon_filter->max = %f", lon_filter->max);
     mvprintw(row_disp++, col, "lon_filter->min = %f", lon_filter->min);
     mvprintw(row_disp++, col, "-------------------------------------------------------------");
-    mvprintw(row_disp++, col, "local way poipn to the way point in the sports field of NTUT");
+    mvprintw(row_disp++, col, "local way poipn to the way point in the sports field of NTUT ");
     mvprintw(row_disp++, col, "-------------------------------------------------------------");
-    mvprintw(row_disp++, col, "distance = %f m", _distance*1000);
+    mvprintw(row_disp++, col, "distance = %f m", _distance*KM2M);
     mvprintw(row_disp++, col, "direction = %f deg", _direction*180/M_PI);
     mvprintw(row_disp++, col, "unit(%f,%f)", _gps_data.fix.latitude * norm(_gps_data.fix.latitude, _gps_data.fix.longitude),
                                              _gps_data.fix.longitude * norm(_gps_data.fix.latitude, _gps_data.fix.longitude));
@@ -365,9 +365,10 @@ void disp_update(int row, int col)
     refresh();
 }
 
+#define GPSD_SAMPLE_RATE 50000
 int main(int argc, char *argv[])
 {
-    int row = 1, col = 3;
+    int row = 1, col = 3, i = 0;
 
     disp_init();
 
@@ -385,7 +386,7 @@ int main(int argc, char *argv[])
     refresh();
 
     /* Latitude */
-    lat_buf = buffer_create(_gps_data.fix.latitude, MA_N);
+    lat_buf = buffer_create(0, MA_N);
 
     if(NULL == lat_buf)
     {
@@ -395,7 +396,7 @@ int main(int argc, char *argv[])
     lat_filter = filter_create(lat_buf);
 
     /* Longitude */
-    lon_buf = buffer_create(_gps_data.fix.longitude, MA_N);
+    lon_buf = buffer_create(0, MA_N);
 
     if(NULL == lon_buf)
     {
@@ -406,12 +407,34 @@ int main(int argc, char *argv[])
 
     for(;;)
     {
-        if (get_gps_data(&_gps_data) == 0)
-        {
-            buffer_add(lat_buf, _gps_data.fix.latitude);
-            filter_update(lat_filter);
+        if ((get_gps_data(&_gps_data) == 0) && (_gps_data.fix.mode > MODE_NO_FIX))
+        {   
+            for( i = 0 ; i < MA_N ; i++)
+            {
+                buffer_add(lat_buf, _gps_data.fix.latitude);
+                buffer_add(lon_buf, _gps_data.fix.longitude);
+            }
 
+            filter_update(lat_filter);
+            filter_update(lon_filter);
+
+            disp_update(row, col);
+
+            break;
+        }
+         
+        usleep(GPSD_SAMPLE_RATE);
+    }
+    
+    for(;;)
+    {
+        if ((get_gps_data(&_gps_data) == 0) && (_gps_data.fix.mode > MODE_NO_FIX))
+        {   
+
+            buffer_add(lat_buf, _gps_data.fix.latitude);
             buffer_add(lon_buf, _gps_data.fix.longitude);
+
+            filter_update(lat_filter);
             filter_update(lon_filter);
 
             _distance = distance(_gps_data.fix.latitude, _gps_data.fix.longitude, wp[0].lat, wp[0].lon, 'K');
@@ -419,13 +442,10 @@ int main(int argc, char *argv[])
             /* This is a simple approach due to a small distance */
             _direction = atan2((wp[0].lat - _gps_data.fix.latitude), (wp[0].lon - _gps_data.fix.longitude));
 
-            lat_max = max(lat_max, _gps_data.fix.latitude);
-            lon_max = max(lon_max, _gps_data.fix.longitude);
-
-            disp_update(row, 3);
+            disp_update(row, col);
         }
 
-        usleep(50000);
+        usleep(GPSD_SAMPLE_RATE);
 
     }
 
