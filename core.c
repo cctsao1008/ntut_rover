@@ -13,6 +13,30 @@
 #include <curses.h>
 #include "core.h"
 
+//the noise in the system
+float lat_Q = 0.022;
+float lat_R = 0.617;
+float lat_K;
+float lat_P;
+float lat_P_temp;
+float lat_P_last = 0;
+float lat_est_last = 0;
+float lat_est_temp;
+float lat_est;
+float lat_measured; //the 'noisy' value we measured
+
+float lon_Q = 0.022;
+float lon_R = 0.617;
+float lon_K;
+float lon_P;
+float lon_P_temp;
+float lon_P_last = 0;
+float lon_est_last = 0;
+float lon_est_temp;
+float lon_est;
+float lon_measured; //the 'noisy' value we measured
+
+
 typedef struct _waypoint
 {
     char* name;
@@ -178,8 +202,9 @@ typedef struct _filter
     fifo*   buf;
     float  avg; /* Average */
     float  sd; /* Standard Deviation */
-    float  max;
-    float  min;
+    float  var; /* Variance */
+    float  max; /* Maximum */
+    float  min; /* Minimum */
 }data_filter;
 
 void filter_update(data_filter* _filter)
@@ -196,14 +221,20 @@ void filter_update(data_filter* _filter)
 
     _filter->avg = sum / (_filter->buf->size);
 
-    /* Calculate standard deviation */
+    /*
+           Calculate standard deviation
+
+           Deviation = _filter->buf->data[i] - _filter->avg
+           
+       */
     sum = 0;
     for(i = 0 ; i < (_filter->buf->size) ; i++)
     {
         sum = sum + (_filter->buf->data[i] - _filter->avg)*(_filter->buf->data[i] - _filter->avg);
     }
 
-    _filter->sd = sqrtf((sum / (_filter->buf->size)));
+    _filter->var = sum / _filter->buf->size;
+    _filter->sd = sqrtf(_filter->var);
 
     /* Find the maximum value of buffer */
     _filter->max = _filter->buf->data[0];
@@ -346,14 +377,20 @@ void disp_update(int row, int col)
     mvprintw(row_disp++, col, "-------------------------------------------------------------");
     mvprintw(row_disp++, col, "Filter Informations                                          ");
     mvprintw(row_disp++, col, "-------------------------------------------------------------");
+    mvprintw(row_disp++, col, "#Latitude :                                                  ");
     mvprintw(row_disp++, col, "lat_filter->avg = %f", lat_filter->avg);
+    //mvprintw(row_disp++, col, "lat_filter->var = %f", lat_filter->var);
     mvprintw(row_disp++, col, "lat_filter->sd = %f", lat_filter->sd);
     mvprintw(row_disp++, col, "lat_filter->max = %f", lat_filter->max);
     mvprintw(row_disp++, col, "lat_filter->min = %f", lat_filter->min);
+    mvprintw(row_disp++, col, "lat_est_last = %f", lat_est_last);
+    mvprintw(row_disp++, col, "#Longitude :                                                 ");
     mvprintw(row_disp++, col, "lon_filter->avg = %f", lon_filter->avg);
+    //mvprintw(row_disp++, col, "lon_filter->var = %f", lon_filter->var);
     mvprintw(row_disp++, col, "lon_filter->sd = %f", lon_filter->sd);
     mvprintw(row_disp++, col, "lon_filter->max = %f", lon_filter->max);
     mvprintw(row_disp++, col, "lon_filter->min = %f", lon_filter->min);
+    mvprintw(row_disp++, col, "lon_est_last = %f", lon_est_last);
     mvprintw(row_disp++, col, "-------------------------------------------------------------");
     mvprintw(row_disp++, col, "local way poipn to the way point in the sports field of NTUT ");
     mvprintw(row_disp++, col, "-------------------------------------------------------------");
@@ -425,6 +462,9 @@ int main(int argc, char *argv[])
          
         usleep(GPSD_SAMPLE_RATE);
     }
+
+    lat_est_last = _gps_data.fix.latitude;
+    lon_est_last = _gps_data.fix.longitude;
     
     for(;;)
     {
@@ -437,10 +477,43 @@ int main(int argc, char *argv[])
             filter_update(lat_filter);
             filter_update(lon_filter);
 
-            _distance = distance(_gps_data.fix.latitude, _gps_data.fix.longitude, wp[0].lat, wp[0].lon, 'K');
+            /* Kalman Filtering Begin */
+            //Prediction
+            lat_est_temp = lat_est_last;
+            lat_P_temp = lat_P_last + lat_Q;
+
+            lon_est_temp = lon_est_last;
+            lon_P_temp = lon_P_last + lon_Q;
+ 
+            //Calculate the Kalman Gain
+            lat_K = lat_P_temp * (1.0 / (lat_P_temp + lat_R));
+            lon_K = lon_P_temp * (1.0 / (lon_P_temp + lon_R));
+ 
+            //Measure
+            lat_measured = _gps_data.fix.latitude; //the real measurement plus noise
+            lon_measured = _gps_data.fix.longitude; //the real measurement plus noise
+ 
+            //Correct
+            lat_est = lat_est_temp + lat_K * (lat_measured - lat_est_temp);
+            lat_P = (1 - lat_K) * lat_P_temp;
+
+            lon_est = lon_est_temp + lon_K * (lon_measured - lon_est_temp);
+            lon_P = (1 - lon_K) * lon_P_temp;
+ 
+            //Update our last's
+            lat_P_last = lat_P;
+            lat_est_last = lat_est;
+
+            lon_P_last = lon_P;
+            lon_est_last = lon_est;
+            /* Kalman Filtering End*/
+
+            //_distance = distance(_gps_data.fix.latitude, _gps_data.fix.longitude, wp[0].lat, wp[0].lon, 'K');
+            _distance = distance(lat_est_last, lon_est_last, wp[0].lat, wp[0].lon, 'K');
 
             /* This is a simple approach due to a small distance */
-            _direction = atan2((wp[0].lat - _gps_data.fix.latitude), (wp[0].lon - _gps_data.fix.longitude));
+            //_direction = atan2((wp[0].lat - _gps_data.fix.latitude), (wp[0].lon - _gps_data.fix.longitude));
+            _direction = atan2((wp[0].lat - lat_est_last), (wp[0].lon - lon_est_last));
 
             disp_update(row, col);
         }
