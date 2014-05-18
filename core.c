@@ -13,29 +13,62 @@
 #include <curses.h>
 #include "core.h"
 
-//the noise in the system
-float lat_Q = 0.022;
-float lat_R = 0.617;
-float lat_K;
-float lat_P;
-float lat_P_temp;
-float lat_P_last = 0;
-float lat_est_last = 0;
-float lat_est_temp;
-float lat_est;
-float lat_measured; //the 'noisy' value we measured
+typedef struct _kf
+{
+    float k;
+    float p;
+    float q;
+    float r;
+    float x;
+}kf_t;
+
+/* Kalman Filter Settings */
+float lat_Q = 0.022; //process noise cvariance
+float lat_R = 0.617; //measurement noise covariance
 
 float lon_Q = 0.022;
 float lon_R = 0.617;
-float lon_K;
-float lon_P;
-float lon_P_temp;
-float lon_P_last = 0;
-float lon_est_last = 0;
-float lon_est_temp;
-float lon_est;
-float lon_measured; //the 'noisy' value we measured
 
+kf_t* lat_kf = NULL;
+kf_t* lon_kf = NULL;
+
+kf_t* kf_create(float q, float r, float x)
+{
+    kf_t* kf = malloc(sizeof(kf_t));
+
+    if(NULL != kf)
+    {
+        kf->k = 0;
+        kf->p = 1; // estimation error covariance
+        kf->q = q; // process noise covariance
+        kf->r = r; // measurement noise covariance
+        kf->x = x;
+    }
+
+    return kf;
+}
+
+float kf_update(kf_t* kf, float z)
+{
+    if(NULL == kf)
+        return 0;
+
+    /* Kalman Prediction */
+    /* Update error covariance ahead*/
+    kf->p = kf->p + kf->q;
+
+    /* Kalman Correction */
+    /* Update kalman gain */
+    kf->k = kf->p / (kf->p + kf->r);
+
+    /* Update estimate */
+    kf->x = kf->x + kf->k * (z - kf->x);
+
+    /* Update error covariance */
+    kf->p = (1 - kf->k) * kf->p;
+
+    return (kf->x); 
+}
 
 typedef struct _waypoint
 {
@@ -105,8 +138,6 @@ float fast_inv_sqrt(float x) {
 
 */
 
-//#define PI 3.14159265358979323846
-
 double deg2rad(double deg) {
   return (deg * M_PI / 180);
 }
@@ -155,131 +186,134 @@ typedef struct _fifo
     float*  data;
     uint8_t size;
     uint8_t index;
-}fifo;
+}fifo_t;
 
 #define HANDLE void*
 
-fifo* buffer_create(float data, uint8_t size)
+fifo_t* fifo_create(float data, uint8_t size)
 {
-    fifo* _fifo = NULL;
-    float* _buf = NULL;
+    fifo_t* f = NULL;
+    float* buf = NULL;
 
-    _fifo = calloc(1, sizeof(fifo));
+    f = calloc(1, sizeof(fifo_t));
 
-    if(NULL != _fifo)
+    if(NULL != f)
     {
-        _buf = malloc(size * sizeof(float));
+        buf = malloc(size * sizeof(float));
 
-        if(NULL != _buf)
+        if(NULL != buf)
         {
-            _fifo->data = _buf;
-            _fifo->size = size;
-            _fifo->index = 0;
+            f->data = buf;
+            f->size = size;
+            f->index = 0;
 
-            memset(_buf, data, size * sizeof(float));
+            memset(buf, data, size * sizeof(float));
         }
         else
         {
-            free(_fifo);
+            free(f);
             fprintf(stderr, "buffer = null!\r\n");
             exit(EXIT_SUCCESS);
         }
     }
 
-    return _fifo;
+    return f;
 }
 
-void buffer_add(fifo* _fifo, float _data)
+void fifo_add(fifo_t* fifo, float data)
 {
-    _fifo->data[_fifo->index] = _data;
+    fifo->data[fifo->index] = data;
 
-    if(((++(_fifo->index)) % (_fifo->size)) == 0)
-        _fifo->index = 0;
+    if(((++(fifo->index)) % (fifo->size)) == 0)
+        fifo->index = 0;
 }
 
 typedef struct _filter
 {
-    fifo*   buf;
-    float  avg; /* Average */
+    fifo_t* fifo;
+    float  mean; /* Average value, Sample mean */
     float  sd; /* Standard Deviation */
-    float  var; /* Variance */
+    float  var; /* Variance, Sample variance */
     float  max; /* Maximum */
     float  min; /* Minimum */
-}data_filter;
+    float  sum;
+}filter_t;
 
-void filter_update(data_filter* _filter)
+void filter_update(filter_t* f, float d)
 {
     float sum = 0;
     uint8_t i = 0;
 
+    f->fifo->data[f->fifo->index] = d;
+
+    if(((++(f->fifo->index)) % (f->fifo->size)) == 0)
+        f->fifo->index = 0;
+
     /* Calculate average */
     sum = 0;
-    for(i = 0 ; i < (_filter->buf->size) ; i++)
+    for(i = 0 ; i < (f->fifo->size) ; i++)
     {
-        sum = sum + _filter->buf->data[i];
+        sum = sum + f->fifo->data[i];
     }
 
-    _filter->avg = sum / (_filter->buf->size);
+    f->sum = sum;
+    f->mean = sum / (f->fifo->size);
 
     /*
            Calculate standard deviation
 
-           Deviation = _filter->buf->data[i] - _filter->avg
+           Deviation = f->fifo->data[i] - f->mean
            
        */
     sum = 0;
-    for(i = 0 ; i < (_filter->buf->size) ; i++)
+    for(i = 0 ; i < (f->fifo->size) ; i++)
     {
-        sum = sum + (_filter->buf->data[i] - _filter->avg)*(_filter->buf->data[i] - _filter->avg);
+        sum = sum + (f->fifo->data[i] - f->mean)*(f->fifo->data[i] - f->mean);
     }
 
-    _filter->var = sum / _filter->buf->size;
-    _filter->sd = sqrtf(_filter->var);
+    f->var = sum / f->fifo->size;
+    f->sd = sqrtf(f->var);
 
     /* Find the maximum value of buffer */
-    _filter->max = _filter->buf->data[0];
-    for(i = 0 ; i < (_filter->buf->size) ; i++)
+    f->max = f->fifo->data[0];
+    for(i = 0 ; i < (f->fifo->size) ; i++)
     {
-        _filter->max = max(_filter->max, _filter->buf->data[i]);
+        f->max = max(f->max, f->fifo->data[i]);
     }
 
     /* Find the  minimum value of buffer */
-    _filter->min = _filter->buf->data[0];
-    for(i = 0 ; i < (_filter->buf->size) ; i++)
+    f->min = f->fifo->data[0];
+    for(i = 0 ; i < (f->fifo->size) ; i++)
     {
-        _filter->min = min(_filter->min, _filter->buf->data[i]);
+        f->min = min(f->min, f->fifo->data[i]);
     }
 }
 
-data_filter* filter_create(fifo* _fifo)
+filter_t* filter_create(fifo_t* fio)
 {
-    data_filter* _filter;
+    filter_t* f;
 
-    _filter = calloc(1, sizeof(data_filter));
+    f = calloc(1, sizeof(filter_t));
 
-    if(NULL != _filter)
+    if(NULL != f)
     {
-        if(NULL != _fifo)
-            _filter->buf = _fifo;
+        if(NULL != fio)
+            f->fifo = fio;
         else
         {
             fprintf(stderr, "fifo = null!");
             exit(EXIT_SUCCESS);
         }
-
-        filter_update(_filter);
     }
 
-    return _filter;
+    return f;
 }
 
-fifo* lat_buf;
-fifo* lon_buf;
-data_filter* lat_filter;
-data_filter* lon_filter;
+fifo_t* lat_fifo;
+fifo_t* lon_fifo;
+filter_t* lat_filter;
+filter_t* lon_filter;
 float _distance = 0, _direction = 0;
-float lat_max, lat_min, lon_max, lon_min;
-float sum_lat = 0, buff_lat[MA_N] = {0}, sum_lon = 0, buff_lon[MA_N] = {0};
 
 struct gps_data_t _gps_data;
 
@@ -294,49 +328,49 @@ struct gps_data_t _gps_data;
 
 bool initColors()
 {
-	if(has_colors())
-	{
-		start_color();
-		init_pair(YELLOWONBLUE ,COLOR_YELLOW, COLOR_BLUE );
-		init_pair(BLACKONWHITE ,COLOR_BLACK ,COLOR_WHITE );
-		init_pair(WHITEONBLACK ,COLOR_WHITE ,COLOR_BLACK );
-		return(true);
+    if(has_colors())
+    {
+        start_color();
+        init_pair(YELLOWONBLUE ,COLOR_YELLOW, COLOR_BLUE );
+        init_pair(BLACKONWHITE ,COLOR_BLACK ,COLOR_WHITE );
+        init_pair(WHITEONBLACK ,COLOR_WHITE ,COLOR_BLACK );
+        return(true);
     }
-	else
-		return(false);
+    else
+        return(false);
 }
-	
+    
 bool setColors(int colorscheme)
 {
-	if(has_colors())
-	{
-		attrset(colorscheme);
-		return(true);
-	}
-	else
-		return(false);
+    if(has_colors())
+    {
+        attrset(colorscheme);
+        return(true);
+    }
+    else
+        return(false);
 }
 
 void clrscr(void)
 {
-	int y, x, maxy, maxx;
-	getmaxyx(stdscr, maxy, maxx);
-	for(y=0; y < maxy; y++)
-		for(x=0; x < maxx; x++)
-			mvaddch(y, x, ' ');
+    int y, x, maxy, maxx;
+    getmaxyx(stdscr, maxy, maxx);
+    for(y=0; y < maxy; y++)
+        for(x=0; x < maxx; x++)
+            mvaddch(y, x, ' ');
 }
 
 void disp_init(void)
 {
     #if 0
-    int row,col;	/* to store the number of rows and *
-					 * the number of colums of the screen */
+    int row,col;    /* to store the number of rows and *
+                     * the number of colums of the screen */
     #endif
 
     initscr(); /* start the curses mode */
     initColors();
-	attrset(COLOR_PAIR(COLORS) | ATTRIBS);
-	clrscr();
+    attrset(COLOR_PAIR(COLORS) | ATTRIBS);
+    clrscr();
     box(stdscr, ACS_VLINE, ACS_HLINE); /*draw a box*/
     curs_set(0); /* Makes the cursor invisible */
     #if 0
@@ -378,19 +412,19 @@ void disp_update(int row, int col)
     mvprintw(row_disp++, col, "Filter Informations                                          ");
     mvprintw(row_disp++, col, "-------------------------------------------------------------");
     mvprintw(row_disp++, col, "#Latitude :                                                  ");
-    mvprintw(row_disp++, col, "lat_filter->avg = %f", lat_filter->avg);
+    mvprintw(row_disp++, col, "lat_filter->mean = %f", lat_filter->mean);
     //mvprintw(row_disp++, col, "lat_filter->var = %f", lat_filter->var);
     mvprintw(row_disp++, col, "lat_filter->sd = %f", lat_filter->sd);
     mvprintw(row_disp++, col, "lat_filter->max = %f", lat_filter->max);
     mvprintw(row_disp++, col, "lat_filter->min = %f", lat_filter->min);
-    mvprintw(row_disp++, col, "lat_est_last = %f", lat_est_last);
+    mvprintw(row_disp++, col, "Kalman lat_est = %f", lat_kf->x);
     mvprintw(row_disp++, col, "#Longitude :                                                 ");
-    mvprintw(row_disp++, col, "lon_filter->avg = %f", lon_filter->avg);
+    mvprintw(row_disp++, col, "lon_filter->mean = %f", lon_filter->mean);
     //mvprintw(row_disp++, col, "lon_filter->var = %f", lon_filter->var);
     mvprintw(row_disp++, col, "lon_filter->sd = %f", lon_filter->sd);
     mvprintw(row_disp++, col, "lon_filter->max = %f", lon_filter->max);
     mvprintw(row_disp++, col, "lon_filter->min = %f", lon_filter->min);
-    mvprintw(row_disp++, col, "lon_est_last = %f", lon_est_last);
+    mvprintw(row_disp++, col, "kalman lon_est = %f", lon_kf->x);
     mvprintw(row_disp++, col, "-------------------------------------------------------------");
     mvprintw(row_disp++, col, "local way poipn to the way point in the sports field of NTUT ");
     mvprintw(row_disp++, col, "-------------------------------------------------------------");
@@ -402,7 +436,7 @@ void disp_update(int row, int col)
     refresh();
 }
 
-#define GPSD_SAMPLE_RATE 50000
+#define GPSD_SAMPLE_RATE 60000
 int main(int argc, char *argv[])
 {
     int row = 1, col = 3, i = 0;
@@ -412,48 +446,78 @@ int main(int argc, char *argv[])
     /* collect gps data */
     if (gps_start() == 0)
     {
-        mvprintw(row++, col, "gpsd connection esthablished, collecting gps data");
+        ;//mvprintw(row++, col, "gpsd connection esthablished, collecting gps data");
+        //refresh();
     }
     else
     {
-        mvprintw(row++, col, "gps data not available");
+        ;//mvprintw(row++, col, "gps data not available");
+        //refresh();
         exit(EXIT_FAILURE);
     }
 
-    refresh();
-
     /* Latitude */
-    lat_buf = buffer_create(0, MA_N);
+    lat_fifo = fifo_create(0, MA_N);
 
-    if(NULL == lat_buf)
+    if(NULL == lat_fifo)
     {
         exit(EXIT_SUCCESS);
     }
 
-    lat_filter = filter_create(lat_buf);
+    lat_filter = filter_create(lat_fifo);
+
+    if(NULL == lat_filter)
+    {
+        exit(EXIT_SUCCESS);
+    }
 
     /* Longitude */
-    lon_buf = buffer_create(0, MA_N);
+    lon_fifo = fifo_create(0, MA_N);
 
-    if(NULL == lon_buf)
+    if(NULL == lon_fifo)
     {
         exit(EXIT_SUCCESS);
     }
 
-    lon_filter = filter_create(lon_buf);
+    lon_filter = filter_create(lon_fifo);
 
+    if(NULL == lon_filter)
+    {
+        exit(EXIT_SUCCESS);
+    }
+
+    lat_kf = kf_create(lat_Q, lat_R, 0);
+
+    if(NULL == lat_kf)
+    {
+        exit(EXIT_SUCCESS);
+    }
+
+    lon_kf = kf_create(lon_Q, lon_R, 0);
+
+    if(NULL == lon_kf)
+    {
+        exit(EXIT_SUCCESS);
+    }
+
+    #if 1
     for(;;)
     {
         if ((get_gps_data(&_gps_data) == 0) && (_gps_data.fix.mode > MODE_NO_FIX))
         {   
             for( i = 0 ; i < MA_N ; i++)
             {
-                buffer_add(lat_buf, _gps_data.fix.latitude);
-                buffer_add(lon_buf, _gps_data.fix.longitude);
+                //filter_update(lat_filter, _gps_data.fix.latitude);
+                //filter_update(lon_filter, _gps_data.fix.longitude);
+                lat_filter->fifo->data[i] = _gps_data.fix.latitude;
+                lon_filter->fifo->data[i] = _gps_data.fix.longitude;
+
+                //kf_update(lat_kf, _gps_data.fix.latitude);
+                //kf_update(lon_kf, _gps_data.fix.longitude);
             }
 
-            filter_update(lat_filter);
-            filter_update(lon_filter);
+            lat_kf->x = _gps_data.fix.latitude;
+            lon_kf->x = _gps_data.fix.longitude;
 
             disp_update(row, col);
 
@@ -462,58 +526,27 @@ int main(int argc, char *argv[])
          
         usleep(GPSD_SAMPLE_RATE);
     }
-
-    lat_est_last = _gps_data.fix.latitude;
-    lon_est_last = _gps_data.fix.longitude;
+    #endif
     
     for(;;)
     {
         if ((get_gps_data(&_gps_data) == 0) && (_gps_data.fix.mode > MODE_NO_FIX))
         {   
 
-            buffer_add(lat_buf, _gps_data.fix.latitude);
-            buffer_add(lon_buf, _gps_data.fix.longitude);
+            filter_update(lat_filter, _gps_data.fix.latitude);
+            filter_update(lon_filter, _gps_data.fix.longitude);
 
-            filter_update(lat_filter);
-            filter_update(lon_filter);
-
-            /* Kalman Filtering Begin */
-            //Prediction
-            lat_est_temp = lat_est_last;
-            lat_P_temp = lat_P_last + lat_Q;
-
-            lon_est_temp = lon_est_last;
-            lon_P_temp = lon_P_last + lon_Q;
- 
-            //Calculate the Kalman Gain
-            lat_K = lat_P_temp * (1.0 / (lat_P_temp + lat_R));
-            lon_K = lon_P_temp * (1.0 / (lon_P_temp + lon_R));
- 
-            //Measure
-            lat_measured = _gps_data.fix.latitude; //the real measurement plus noise
-            lon_measured = _gps_data.fix.longitude; //the real measurement plus noise
- 
-            //Correct
-            lat_est = lat_est_temp + lat_K * (lat_measured - lat_est_temp);
-            lat_P = (1 - lat_K) * lat_P_temp;
-
-            lon_est = lon_est_temp + lon_K * (lon_measured - lon_est_temp);
-            lon_P = (1 - lon_K) * lon_P_temp;
- 
-            //Update our last's
-            lat_P_last = lat_P;
-            lat_est_last = lat_est;
-
-            lon_P_last = lon_P;
-            lon_est_last = lon_est;
-            /* Kalman Filtering End*/
+            kf_update(lat_kf, _gps_data.fix.latitude);
+            kf_update(lon_kf, _gps_data.fix.longitude);
 
             //_distance = distance(_gps_data.fix.latitude, _gps_data.fix.longitude, wp[0].lat, wp[0].lon, 'K');
-            _distance = distance(lat_est_last, lon_est_last, wp[0].lat, wp[0].lon, 'K');
+            _distance = distance(lat_kf->x, lon_kf->x, wp[0].lat, wp[0].lon, 'K');
 
             /* This is a simple approach due to a small distance */
             //_direction = atan2((wp[0].lat - _gps_data.fix.latitude), (wp[0].lon - _gps_data.fix.longitude));
-            _direction = atan2((wp[0].lat - lat_est_last), (wp[0].lon - lon_est_last));
+            _direction = atan2((wp[0].lat - lat_kf->x), (wp[0].lon - lon_kf->x));
+
+            //printf("%f, %f, %f, %f, %f, %f\r\n", _gps_data.fix.latitude, lat_filter->mean, lat_est, _gps_data.fix.longitude, lon_filter->mean, lon_est);
 
             disp_update(row, col);
         }
