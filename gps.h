@@ -1,3 +1,6 @@
+#ifndef _GPS_H_
+#define _GPS_H_
+
 #include <stdio.h>
 #include <stdlib.h> /* for exit(EXIT_SUCCESS) or exit(EXIT_FAILURE)*/
 #include <ncurses.h>
@@ -12,3 +15,4 @@ int     gps_start(void);
 void    gps_stop(void);
 //int     get_gps_data(struct gps_fix_t *);
 int     get_gps_data(struct gps_data_t *gd);
+#endif

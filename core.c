@@ -11,7 +11,10 @@
  *
  *********************************************************************/
 #include <curses.h>
+#include <signal.h>
+#include <pthread.h>
 #include "core.h"
+#include "motor.h"
 
 typedef struct _kf
 {
@@ -39,7 +42,8 @@ kf_t* kf_create(float q, float r, float x)
     if(NULL != kf)
     {
         kf->k = 0;
-        kf->p = 1; // estimation error covariance
+        //kf->p = sqrtf(q * q + r * r); // estimation error covariance
+        kf->p = 1;
         kf->q = q; // process noise covariance
         kf->r = r; // measurement noise covariance
         kf->x = x;
@@ -212,7 +216,7 @@ fifo_t* fifo_create(float data, uint8_t size)
         else
         {
             free(f);
-            fprintf(stderr, "buffer = null!\r\n");
+            fprintf(stderr, "buffer = null!\r\n\r\n");
             exit(EXIT_SUCCESS);
         }
     }
@@ -301,7 +305,7 @@ filter_t* filter_create(fifo_t* fio)
             f->fifo = fio;
         else
         {
-            fprintf(stderr, "fifo = null!");
+            fprintf(stderr, "fifo = null!\r\n");
             exit(EXIT_SUCCESS);
         }
     }
@@ -317,6 +321,99 @@ float _distance = 0, _direction = 0;
 
 struct gps_data_t _gps_data;
 
+void die(int sig)
+{
+    if (!isendwin())
+    {
+        /* Move the cursor to the bottom left corner. */
+        (void)mvcur(0, COLS - 1, LINES - 1, 0);
+
+        /* Put input attributes back the way they were. */
+        (void)echo();
+
+        /* Done with curses. */
+        (void)endwin();
+    }
+
+    /* We're done talking to gpsd. */
+    (void)gps_close(&_gps_data);
+
+    /* Stop motor */
+    motor_update(M_BRK, 0, 0);
+
+    printf("bye bye\r\n");
+    exit(EXIT_SUCCESS);
+}
+
+char dir = 'B';
+int pwm = 0;
+
+void commander(void)
+{
+    int c = ' ';
+
+    c = getch();
+        
+    if (c == KEY_DOWN)
+    {
+        pwm -= 10;
+
+        if(pwm < -250)
+            pwm = -250;
+        else if(pwm < 0)
+            motor_update(M_BWD, pwm, pwm);
+        else
+            motor_update(M_FWD, pwm, pwm);
+
+        dir = 'D';
+    }
+
+    if (c == KEY_UP)
+    {
+        pwm += 10;
+
+        if(pwm > 250)
+            pwm = 250;
+        else if(pwm > 0)
+            motor_update(M_FWD, pwm, pwm);
+        else
+            motor_update(M_BWD, pwm, pwm);
+
+        dir = 'U';
+    }
+
+    if (c == KEY_LEFT)
+    {
+        motor_update(M_TNL, pwm, pwm);
+        dir = 'L';
+    }
+
+    if (c == KEY_RIGHT)
+    {
+        motor_update(M_TNR, pwm, pwm);
+        dir = 'R';
+    }
+
+    if (c == ' ')
+    {
+        pwm = 0;
+        motor_update(M_BRK, pwm, pwm );
+        dir = 'B';
+    }
+
+}
+
+void thread_cmd(void)
+{
+    for(;;)
+    {
+        commander();
+        usleep(50000);
+    }
+}
+
+#define KM2M 1000
+#define USE_CURSES
 
 #define YELLOWONBLUE 1
 #define BLACKONWHITE 2
@@ -326,7 +423,7 @@ struct gps_data_t _gps_data;
 //#define COLORS YELLOWONBLUE
 #define COLORS BLACKONWHITE
 
-bool initColors()
+bool init_colors()
 {
     if(has_colors())
     {
@@ -340,7 +437,7 @@ bool initColors()
         return(false);
 }
     
-bool setColors(int colorscheme)
+bool set_colors(int colorscheme)
 {
     if(has_colors())
     {
@@ -362,99 +459,103 @@ void clrscr(void)
 
 void disp_init(void)
 {
+    #ifdef USE_CURSES
     #if 0
     int row,col;    /* to store the number of rows and *
                      * the number of colums of the screen */
     #endif
 
     initscr(); /* start the curses mode */
-    initColors();
-    attrset(COLOR_PAIR(COLORS) | ATTRIBS);
-    clrscr();
+    keypad(stdscr, TRUE);     /* We get key input    from the main window */
+    noecho(); /* Don't echo() while we do getch */
+    cbreak();
+    timeout(0);
+    //init_colors();
+    //attrset(COLOR_PAIR(COLORS) | ATTRIBS);
+    //clrscr();
     box(stdscr, ACS_VLINE, ACS_HLINE); /*draw a box*/
     curs_set(0); /* Makes the cursor invisible */
     #if 0
     getmaxyx(stdscr,row,col); /* get the number of rows and columns */
     #endif
-    start_color(); /* Be sure not to forget this, it will enable colors */
-    init_pair(1, COLOR_RED, COLOR_CYAN); /* You can make as much color pairs as you want, be sure to change the ID number */
-    init_pair(2, COLOR_YELLOW, COLOR_GREEN);
-    attron(A_UNDERLINE | COLOR_PAIR(1)); /* This turns on the underlined text and color pair 1 */
+    //start_color(); /* Be sure not to forget this, it will enable colors */
+    //init_pair(1, COLOR_RED, COLOR_CYAN); /* You can make as much color pairs as you want, be sure to change the ID number */
+    //init_pair(2, COLOR_YELLOW, COLOR_GREEN);
+    //attron(A_UNDERLINE | COLOR_PAIR(1)); /* This turns on the underlined text and color pair 1 */
     //printw("This is underlined red text with cyan background\n");
-    attroff(A_UNDERLINE | COLOR_PAIR(1));
-    attron(A_BOLD | COLOR_PAIR(2));
+    //attroff(A_UNDERLINE | COLOR_PAIR(1));
+    //attron(A_BOLD | COLOR_PAIR(2));
     //printw("This is bold yellow text with green background");
-    attroff(A_BOLD | COLOR_PAIR(2));
+    //attroff(A_BOLD | COLOR_PAIR(2));
     //move(LINES/2, COLS/2); /*move the cursor to the center*/
     refresh();
+    #endif
 }
 
-#define KM2M 1000
 void disp_update(int row, int col)
 {
+    #ifdef USE_CURSES
     int row_disp = row;
-                     
-    erase();
-    attrset(COLOR_PAIR(COLORS) | ATTRIBS);
-    clrscr();
-    box(stdscr, ACS_VLINE, ACS_HLINE); /*draw a box*/
+    #define MSG(a, b, ...) mvprintw(a, b, __VA_ARGS__)
+    #else
+    #define MSG(a, b, ...) printf(__VA_ARGS__); printf("\r\n")
+    #endif
 
-    mvprintw(row_disp++, col, "-------------------------------------------------------------");
-    mvprintw(row_disp++, col, "GPS(Global Positioning System) informations that got from    ");
-    mvprintw(row_disp++, col, "GPSd(a GPS service daemon)                                   ");
-    mvprintw(row_disp++, col, "-------------------------------------------------------------");
-    mvprintw(row_disp++, col, "gps_data.status= %d", _gps_data.status);
-    mvprintw(row_disp++, col, "gps_data.fix.track= %f", _gps_data.fix.track);
-    mvprintw(row_disp++, col, "gps_data.fix.speed= %f", _gps_data.fix.speed);
-    mvprintw(row_disp++, col, "gps_data.fix.latitude = %f", _gps_data.fix.latitude);
-    mvprintw(row_disp++, col, "gps_data.fix.longitude = %f", _gps_data.fix.longitude);
-    mvprintw(row_disp++, col, "-------------------------------------------------------------");
-    mvprintw(row_disp++, col, "Filter Informations                                          ");
-    mvprintw(row_disp++, col, "-------------------------------------------------------------");
-    mvprintw(row_disp++, col, "#Latitude :                                                  ");
-    mvprintw(row_disp++, col, "lat_filter->mean = %f", lat_filter->mean);
-    //mvprintw(row_disp++, col, "lat_filter->var = %f", lat_filter->var);
-    mvprintw(row_disp++, col, "lat_filter->sd = %f", lat_filter->sd);
-    mvprintw(row_disp++, col, "lat_filter->max = %f", lat_filter->max);
-    mvprintw(row_disp++, col, "lat_filter->min = %f", lat_filter->min);
-    mvprintw(row_disp++, col, "Kalman lat_est = %f", lat_kf->x);
-    mvprintw(row_disp++, col, "#Longitude :                                                 ");
-    mvprintw(row_disp++, col, "lon_filter->mean = %f", lon_filter->mean);
-    //mvprintw(row_disp++, col, "lon_filter->var = %f", lon_filter->var);
-    mvprintw(row_disp++, col, "lon_filter->sd = %f", lon_filter->sd);
-    mvprintw(row_disp++, col, "lon_filter->max = %f", lon_filter->max);
-    mvprintw(row_disp++, col, "lon_filter->min = %f", lon_filter->min);
-    mvprintw(row_disp++, col, "kalman lon_est = %f", lon_kf->x);
-    mvprintw(row_disp++, col, "-------------------------------------------------------------");
-    mvprintw(row_disp++, col, "local way poipn to the way point in the sports field of NTUT ");
-    mvprintw(row_disp++, col, "-------------------------------------------------------------");
-    mvprintw(row_disp++, col, "distance = %f m", _distance*KM2M);
-    mvprintw(row_disp++, col, "direction = %f deg", _direction*180/M_PI);
-    mvprintw(row_disp++, col, "unit(%f,%f)", _gps_data.fix.latitude * norm(_gps_data.fix.latitude, _gps_data.fix.longitude),
-                                             _gps_data.fix.longitude * norm(_gps_data.fix.latitude, _gps_data.fix.longitude));
-    mvprintw(row_disp++, col, "-------------------------------------------------------------");
+    #ifdef USE_CURSES
+    erase();
+    //attrset(COLOR_PAIR(COLORS) | ATTRIBS);
+    //clrscr();
+    box(stdscr, ACS_VLINE, ACS_HLINE); /*draw a box*/
+    #endif
+
+    MSG(row_disp++, col, "-------------------------------------------------------------");
+    MSG(row_disp++, col, "GPS(Global Positioning System) informations that got from    ");
+    MSG(row_disp++, col, "GPSd(a GPS service daemon)                                   ");
+    MSG(row_disp++, col, "-------------------------------------------------------------");
+    MSG(row_disp++, col, "gps_data.status= %d", _gps_data.status);
+    MSG(row_disp++, col, "gps_data.fix.track= %f", _gps_data.fix.track);
+    MSG(row_disp++, col, "gps_data.fix.speed= %f", _gps_data.fix.speed);
+    MSG(row_disp++, col, "gps_data.fix.latitude = %f", _gps_data.fix.latitude);
+    MSG(row_disp++, col, "gps_data.fix.longitude = %f", _gps_data.fix.longitude);
+    MSG(row_disp++, col, "-------------------------------------------------------------");
+    MSG(row_disp++, col, "Filter Informations                                          ");
+    MSG(row_disp++, col, "-------------------------------------------------------------");
+    MSG(row_disp++, col, "#Latitude :                                                  ");
+    MSG(row_disp++, col, "lat_filter->mean = %f", lat_filter->mean);
+    MSG(row_disp++, col, "lat_filter->sd = %f", lat_filter->sd);
+    MSG(row_disp++, col, "lat_filter->max = %f", lat_filter->max);
+    MSG(row_disp++, col, "lat_filter->min = %f", lat_filter->min);
+    MSG(row_disp++, col, "Kalman lat_est = %f", lat_kf->x);
+    MSG(row_disp++, col, "#Longitude :                                                 ");
+    MSG(row_disp++, col, "lon_filter->mean = %f", lon_filter->mean);
+    MSG(row_disp++, col, "lon_filter->sd = %f", lon_filter->sd);
+    MSG(row_disp++, col, "lon_filter->max = %f", lon_filter->max);
+    MSG(row_disp++, col, "lon_filter->min = %f", lon_filter->min);
+    MSG(row_disp++, col, "kalman lon_est = %f", lon_kf->x);
+    MSG(row_disp++, col, "-------------------------------------------------------------");
+    MSG(row_disp++, col, "local way poipn to the way point in the sports field of NTUT ");
+    MSG(row_disp++, col, "-------------------------------------------------------------");
+    MSG(row_disp++, col, "distance = %f m", _distance*KM2M);
+    MSG(row_disp++, col, "direction = %f deg", _direction*180/M_PI);
+    MSG(row_disp++, col, "motor ctrl = dir(%c), pwm(%03d)", dir, pwm);
+    MSG(row_disp++, col, "-------------------------------------------------------------");
+
+    #ifdef USE_CURSES
     refresh();
+    #endif
 }
 
-#define GPSD_SAMPLE_RATE 60000
+#define GPSD_SAMPLE_RATE 80000
 int main(int argc, char *argv[])
 {
     int row = 1, col = 3, i = 0;
+    pthread_t thread;
 
-    disp_init();
+    (void)signal(SIGINT, die);
 
     /* collect gps data */
-    if (gps_start() == 0)
-    {
-        ;//mvprintw(row++, col, "gpsd connection esthablished, collecting gps data");
-        //refresh();
-    }
-    else
-    {
-        ;//mvprintw(row++, col, "gps data not available");
-        //refresh();
+    if (gps_start() != 0)
         exit(EXIT_FAILURE);
-    }
 
     /* Latitude */
     lat_fifo = fifo_create(0, MA_N);
@@ -500,10 +601,23 @@ int main(int argc, char *argv[])
         exit(EXIT_SUCCESS);
     }
 
+    motor_initialize();
+
+    disp_init();
+
+    if(0 != pthread_create(&thread,NULL,(void *) thread_cmd,NULL))
+    {
+        exit(EXIT_SUCCESS);
+    }
+
+    /* Pre-Initialization */
     #if 1
     for(;;)
     {
-        if ((get_gps_data(&_gps_data) == 0) && (_gps_data.fix.mode > MODE_NO_FIX))
+        if(get_gps_data(&_gps_data) != 0)
+            break;
+
+        if (_gps_data.fix.mode > MODE_NO_FIX)
         {   
             for( i = 0 ; i < MA_N ; i++)
             {
@@ -523,14 +637,21 @@ int main(int argc, char *argv[])
 
             break;
         }
+
+        //commander();
+        disp_update(row, col);
          
         usleep(GPSD_SAMPLE_RATE);
     }
     #endif
-    
+
+    /* Main Loop */
     for(;;)
     {
-        if ((get_gps_data(&_gps_data) == 0) && (_gps_data.fix.mode > MODE_NO_FIX))
+        if(get_gps_data(&_gps_data) != 0)
+            break;
+
+        if (_gps_data.fix.mode > MODE_NO_FIX)
         {   
 
             filter_update(lat_filter, _gps_data.fix.latitude);
@@ -547,9 +668,10 @@ int main(int argc, char *argv[])
             _direction = atan2((wp[0].lat - lat_kf->x), (wp[0].lon - lon_kf->x));
 
             //printf("%f, %f, %f, %f, %f, %f\r\n", _gps_data.fix.latitude, lat_filter->mean, lat_est, _gps_data.fix.longitude, lon_filter->mean, lon_est);
-
-            disp_update(row, col);
         }
+
+        //commander();
+        disp_update(row, col);
 
         usleep(GPSD_SAMPLE_RATE);
 

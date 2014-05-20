@@ -33,19 +33,17 @@ struct fixsource_t
 /* Function to call when we're all done.  Does a bit of clean-up. */
 static void die(int sig)
 {
-    #if 0
     if (!isendwin())
     {
-    /* Move the cursor to the bottom left corner. */
-    (void)mvcur(0, COLS - 1, LINES - 1, 0);
+        /* Move the cursor to the bottom left corner. */
+        (void)mvcur(0, COLS - 1, LINES - 1, 0);
 
-    /* Put input attributes back the way they were. */
-    (void)echo();
+        /* Put input attributes back the way they were. */
+        (void)echo();
 
-    /* Done with curses. */
-    (void)endwin();
+        /* Done with curses. */
+        (void)endwin();
     }
-    #endif
 
     /* We're done talking to gpsd. */
     (void)gps_close(&gpsdata);
@@ -67,7 +65,7 @@ static void die(int sig)
     break;
     }
 
-    /* Bye! */
+    (void)fprintf(stderr, "bye bye\r\n");
     exit(EXIT_SUCCESS);
 }
 
@@ -190,11 +188,12 @@ get_gps_data(struct gps_data_t *gd) {
 
 	if (!gps_waiting(&gpsdata, 5000000)) {
 	    die(GPS_TIMEOUT);
+	    gps_available = 0;
 	} else {
 	    errno = 0;
 	    if (gps_read(&gpsdata) == -1) {
-		fprintf(stderr, "cgps: socket error 4\n");
-		die(errno == 0 ? GPS_GONE : GPS_ERROR);
+		    //fprintf(stderr, "cgps: socket error 4\n");
+		    die(errno == 0 ? GPS_GONE : GPS_ERROR);
 	    }
 	}
 
