@@ -134,7 +134,10 @@ typedef struct _motor
 }motor_t;
 
 void motor_initialize(void)
-{    
+{
+    //setreuid(geteuid(), getuid());
+    //seteuid(0);
+
     if (wiringPiSetup() == -1)
         exit (1);
 
@@ -199,7 +202,7 @@ void motor_update(m_ctrl_t mode, int pwm1, int pwm2)
 
         case M_BRK :
 
-            #if 1 /* Motor Off */
+            #if 0 /* Motor Off */
             digitalWrite (L298N_IN1, 1);
             digitalWrite (L298N_IN2, 0);
             softPwmWrite (L298N_ENA, 0);
