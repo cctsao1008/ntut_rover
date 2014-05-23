@@ -5,6 +5,4 @@ The NTUT-Rover is a small RC car with a Raspberry Pi for a brain, that can run m
 
 ![rover-assembly](https://lh6.googleusercontent.com/-xh0gyoFbYQs/U3l5dO7d-MI/AAAAAAAATDA/cQ1o3rChDGg/w463-h823-no/20140519104520.jpg "rover-assembly")
 
-https://lh4.googleusercontent.com/-oP7CwxqW3xY/U3uGpQy0q5I/AAAAAAAATEo/rlagaL1QnAY/w300-h533-no/IMG_20140521_004044.jpg
-
 ![rover-assembly-2](https://lh4.googleusercontent.com/-oP7CwxqW3xY/U3uGpQy0q5I/AAAAAAAATEo/rlagaL1QnAY/w300-h533-no/IMG_20140521_004044.jpg "rover-assembly-2")
