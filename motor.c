@@ -158,22 +158,22 @@ void motor_update(m_ctrl_t mode, int pwm1, int pwm2)
     {
         case M_FWD :
 
-            digitalWrite (L298N_IN1, 1);
-            digitalWrite (L298N_IN2, 0);
+            digitalWrite (L298N_IN1, 0);
+            digitalWrite (L298N_IN2, 1);
             softPwmWrite (L298N_ENA, pwm1);
-            digitalWrite (L298N_IN3, 1); 
-            digitalWrite (L298N_IN4, 0);
+            digitalWrite (L298N_IN3, 0); 
+            digitalWrite (L298N_IN4, 1);
             softPwmWrite (L298N_ENB, pwm2);
 
             break;
 
         case M_BWD :
 
-            digitalWrite (L298N_IN1, 0); 
-            digitalWrite (L298N_IN2, 1);
+            digitalWrite (L298N_IN1, 1); 
+            digitalWrite (L298N_IN2, 0);
             softPwmWrite (L298N_ENA, pwm1);
-            digitalWrite (L298N_IN3, 0); 
-            digitalWrite (L298N_IN4, 1);
+            digitalWrite (L298N_IN3, 1); 
+            digitalWrite (L298N_IN4, 0);
             softPwmWrite (L298N_ENB, pwm2);
 
             break;
@@ -200,23 +200,24 @@ void motor_update(m_ctrl_t mode, int pwm1, int pwm2)
 
             break;
 
-        case M_BRK :
+        case M_BRK_S :
 
-            #if 0 /* Motor Off */
             digitalWrite (L298N_IN1, 1);
             digitalWrite (L298N_IN2, 0);
             softPwmWrite (L298N_ENA, 0);
             digitalWrite (L298N_IN3, 1); 
             digitalWrite (L298N_IN4, 0);
             softPwmWrite (L298N_ENB, 0);
-            #else /* Motor Break */
+
+            break;
+
+        case M_BRK_H :
             digitalWrite (L298N_IN1, 1);
             digitalWrite (L298N_IN2, 1);
             softPwmWrite (L298N_ENA, 1);
             digitalWrite (L298N_IN3, 1); 
             digitalWrite (L298N_IN4, 1);
             softPwmWrite (L298N_ENB, 1);
-            #endif
 
             break;
 
