@@ -14,13 +14,11 @@
 #include <signal.h>
 #include <pthread.h>
 #include "core.h"
-#include "motor.h"
-
-//#define USE_DATA_DUMP
 
 /* Kalman Filter Settings */
 kf_t* lat_kf = NULL;
 kf_t* lon_kf = NULL;
+kf_t* dist_kf = NULL;
 fifo_t* lat_fifo;
 fifo_t* lon_fifo;
 filter_t* lat_filter;
@@ -29,17 +27,79 @@ double _distance = 0, _direction = 0;
 
 char dir = 'B';
 int pwm = 0;
+int socket_iot = -1;
 
-waypoint wp[2] = 
+waypoint wp[] = 
 {
     [0] = {
-        .name = "NTUT",
-        .lat =  25.042583, // N
-        .lon = 121.537674, // E
+        .name = "wp0",
+        .lat =  25.042137, // N
+        .lon = 121.537444, // E
+    },
+    [1] = {
+        .name = " ",
+        .lat =  25.042137, // N
+        .lon = 121.537444, // E
+    },
+    [2] = {
+        .name = " ",
+        .lat =  25.042137, // N
+        .lon = 121.537444, // E
+    },
+    [3] = {
+        .name = " ",
+        .lat =  25.042137, // N
+        .lon = 121.537444, // E
+    },
+    [4] = {
+        .name = " ",
+        .lat =  25.042137, // N
+        .lon = 121.537444, // E
     },
 };
 
 struct gps_data_t gps_data_curr;
+struct timeval t1, t2;
+double elapsedTime;
+FILE *fcsv;
+FILE *fkml;
+
+char fcsv_buf[256*1024];
+char fkml_buf[256*1024];
+
+static const char *pkml_hs =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n"
+        "<kml xmlns=\"http://www.opengis.net/kml/2.2\"\r\n"
+        "     xmlns:gx=\"http://www.google.com/kml/ext/2.2\">\r\n"
+        "<Folder>\r\n"
+        "    <Placemark>\r\n"
+        "        <Style>\r\n"
+        "            <LineStyle>\r\n"
+        "                <color>ff00ff00</color>\r\n"
+        "            </LineStyle>\r\n"
+        "        </Style>\r\n"
+        "        <gx:Track>\r\n";
+
+static const char *pkml_he =
+        "        </gx:Track>\r\n"
+        "    </Placemark>\r\n"
+        "</Folder>\r\n"
+        "</kml>";
+
+static const char *pkml_ds = "           <gx:coord>";
+static const char *pkml_de = "</gx:coord>";
+
+const char *pDataPoint = "POST /v1.0/device/%s/sensor/%s/datapoints HTTP/1.1\r\n"
+        "Host: api.yeelink.net\r\n"
+        "Accept: */*\r\n"
+        "U-ApiKey: %s\r\n"
+        "Content-Length: %d\r\n"
+        "Content-type: application/json;charset=utf-8\r\n"
+        "Connection: close\r\n\r\n"
+        "%s\r\n";
+
+int navi_enabled = FALSE;
+
 
 kf_t* kf_create(double q, double r, double x)
 {
@@ -136,8 +196,8 @@ double filter_cov(filter_t* f1, filter_t* f2)
 
 void filter_update(filter_t* f, double d)
 {
-    double sum_1 = 0, sum_2 = 0;
-    uint8_t i = 0;
+    double sum = 0, a = 0.688, min_t = 0, max_t = 0; // 50% 0.688
+    uint8_t i = 0, i_t = 0;
 
     f->fifo->data[f->fifo->index] = d;
 
@@ -147,26 +207,53 @@ void filter_update(filter_t* f, double d)
     f->max = f->fifo->data[0];
     f->min = f->fifo->data[0];
 
+    sum = 0;
+
     for(i = 0 ; i < (f->fifo->size) ; i++)
     {
-        sum_1 += f->fifo->data[i];
-        sum_2 += powf((f->fifo->data[i] - f->mean), 2);
+        /* Summation of all data */
+        sum += f->fifo->data[i];
 
         /* Find the maximum and minimum value of buffer */
         f->max = max(f->max, f->fifo->data[i]);
         f->min = min(f->min, f->fifo->data[i]);
     }
 
-    f->sum = sum_1;
+    f->sum = sum;
 
     /* Calculate moving average */
-    f->mean = sum_1 / (f->fifo->size);
+    f->mean = sum / (f->fifo->size);
 
-    f->var = sum_2 / f->fifo->size;
+    sum = 0;
+
+    for(i = 0 ; i < (f->fifo->size) ; i++)
+        sum += pow((f->fifo->data[i] - f->mean), 2);
+
+    //f->var = sum / (f->fifo->size); // sigma ^ 2,  (in population)
+    f->var = sum / ((f->fifo->size) - 1 );
 
     /* Calculate standard deviation */
-    f->sd = sqrtf(f->var);
-    
+    f->sd = sqrt(f->var);
+
+    /* Calculate Student-T mean */
+    max_t = f->mean + (a * f->sd / sqrt(f->fifo->size));
+    min_t = f->mean - (a * f->sd / sqrt(f->fifo->size));
+
+    sum = 0;
+
+    for(i = 0 ; i < (f->fifo->size) ; i++)
+    {
+        if( (max_t > (f->fifo->data[i])) && (min_t < (f->fifo->data[i])))
+        {
+            sum += f->fifo->data[i];
+            i_t++;
+        }
+    }
+
+    if(i_t == 0)
+        f->mean_t = f->mean;
+    else
+        f->mean_t = sum / i_t;
 }
 
 filter_t* filter_create(fifo_t* fio)
@@ -240,7 +327,7 @@ double rad2deg(double rad) {
 
 */
 
-double distance(double lat1, double lon1, double lat2, double lon2, char unit)
+double calc_distance(double lat1, double lon1, double lat2, double lon2, char unit)
 {
     double theta, dist;
 
@@ -282,10 +369,32 @@ void signal_handler(int sig)
     }
 
     /* We're done talking to gpsd. */
+    printf("close gps\r\n");
     (void)gps_close(&gps_data_curr);
 
     /* Stop motor */
-    motor_update(M_BRK, 0, 0);
+    motor_update(M_BRK_H, 0, 0);
+
+    if(fcsv != NULL)
+    {
+        printf("close file\r\n");
+        fflush(fcsv);
+        fclose(fcsv);
+    }
+
+    if(fkml != NULL)
+    {
+        fprintf(fkml, pkml_he);
+        printf("close file\r\n");
+        fflush(fkml);
+        fclose(fkml);
+    }
+
+    if(socket_iot != 0)
+    {
+        printf("close socket\r\n");
+        socket_close(socket_iot);
+    }
 
     printf("bye bye\r\n");
     exit(EXIT_SUCCESS);
@@ -374,7 +483,7 @@ void disp_update(int row, int col)
 
     #ifdef USE_CURSES
     //erase();
-    clear();
+    //clear();
     //attrset(COLOR_PAIR(COLORS) | ATTRIBS);
     //clrscr();
     //box(stdscr, ACS_VLINE, ACS_HLINE); /*draw a box*/
@@ -385,31 +494,40 @@ void disp_update(int row, int col)
     MSG(row_disp++, col, "GPSd(a GPS service daemon)                                   ");
     MSG(row_disp++, col, "-------------------------------------------------------------");
     MSG(row_disp++, col, "gps_data.status= %d", gps_data_curr.status);
-    MSG(row_disp++, col, "gps_data.fix.track= %f", gps_data_curr.fix.track);
-    MSG(row_disp++, col, "gps_data.fix.speed= %f", gps_data_curr.fix.speed);
-    MSG(row_disp++, col, "gps_data.fix.latitude = %f", gps_data_curr.fix.latitude);
-    MSG(row_disp++, col, "gps_data.fix.longitude = %f", gps_data_curr.fix.longitude);
+    MSG(row_disp++, col, "gps_data.fix.track= %10f", gps_data_curr.fix.track);
+    MSG(row_disp++, col, "gps_data.fix.speed= %10f", gps_data_curr.fix.speed);
+    MSG(row_disp++, col, "gps_data.fix.latitude = %10f", gps_data_curr.fix.latitude);
+    MSG(row_disp++, col, "gps_data.fix.longitude = %10f", gps_data_curr.fix.longitude);
+    MSG(row_disp++, col, "gps_data.dop.hdop = %10f", gps_data_curr.dop.hdop);
+    MSG(row_disp++, col, "gps_data.dop.pdop = %10f", gps_data_curr.dop.pdop);
+    MSG(row_disp++, col, "gps_data.fix.epx = %10f", gps_data_curr.fix.epx);
+    MSG(row_disp++, col, "gps_data.fix.epy = %10f", gps_data_curr.fix.epy);
+    MSG(row_disp++, col, "elapsedTime = %10f us", elapsedTime);
     MSG(row_disp++, col, "-------------------------------------------------------------");
     MSG(row_disp++, col, "Filter Informations                                          ");
     MSG(row_disp++, col, "-------------------------------------------------------------");
-    MSG(row_disp++, col, "#Latitude :                                                  ");
-    MSG(row_disp++, col, "lat_filter->mean = %f", lat_filter->mean);
-    MSG(row_disp++, col, "lat_filter->sd = %f", lat_filter->sd);
-    MSG(row_disp++, col, "lat_filter->max = %f", lat_filter->max);
-    MSG(row_disp++, col, "lat_filter->min = %f", lat_filter->min);
-    MSG(row_disp++, col, "Kalman lat_est = %f", lat_kf->x);
-    MSG(row_disp++, col, "#Longitude :                                                 ");
-    MSG(row_disp++, col, "lon_filter->mean = %f", lon_filter->mean);
-    MSG(row_disp++, col, "lon_filter->sd = %f", lon_filter->sd);
-    MSG(row_disp++, col, "lon_filter->max = %f", lon_filter->max);
-    MSG(row_disp++, col, "lon_filter->min = %f", lon_filter->min);
-    MSG(row_disp++, col, "kalman lon_est = %f", lon_kf->x);
+    MSG(row_disp++, col, ">> Latitude << :                                                  ");
+    MSG(row_disp++, col, "lat_filter->mean = %10f", lat_filter->mean);
+    //MSG(row_disp++, col, "lat_filter->mean_t = %10f", lat_filter->mean_t);
+    MSG(row_disp++, col, "lat_filter->sd = %10f", lat_filter->sd);
+    //MSG(row_disp++, col, "lat_filter->max = %10f", lat_filter->max);
+    //MSG(row_disp++, col, "lat_filter->min = %10f", lat_filter->min);
+    MSG(row_disp++, col, "Kalman lat_est = %10f", lat_kf->x);
+    MSG(row_disp++, col, ">> Longitude << :                                                 ");
+    MSG(row_disp++, col, "lon_filter->mean = %10f", lon_filter->mean);
+    //MSG(row_disp++, col, "lon_filter->mean_t = %10f", lon_filter->mean_t);
+    MSG(row_disp++, col, "lon_filter->sd = %10f", lon_filter->sd);
+    //MSG(row_disp++, col, "lon_filter->max = %10f", lon_filter->max);
+    //MSG(row_disp++, col, "lon_filter->min = %10f", lon_filter->min);
+    MSG(row_disp++, col, "kalman lon_est = %10f", lon_kf->x);
     MSG(row_disp++, col, "-------------------------------------------------------------");
     MSG(row_disp++, col, "local way poipn to the way point in the sports field of NTUT ");
     MSG(row_disp++, col, "-------------------------------------------------------------");
-    MSG(row_disp++, col, "distance = %f m", _distance*KM2M);
-    MSG(row_disp++, col, "direction = %f deg", _direction*180/M_PI);
+    MSG(row_disp++, col, "distance = %10f m", _distance * KM2M);
+    MSG(row_disp++, col, "direction = %10f deg", _direction * 180 / M_PI);
     MSG(row_disp++, col, "motor ctrl = dir(%c), pwm(%03d)", dir, pwm);
+    MSG(row_disp++, col, "navi_enabled = %d", navi_enabled);
+    MSG(row_disp++, col, "mag_chip_id = 0x%x", get_mag_id());
     MSG(row_disp++, col, "-------------------------------------------------------------");
 
     #ifdef USE_CURSES
@@ -417,59 +535,106 @@ void disp_update(int row, int col)
     #endif
 }
 
+
+#define PWM_FC1 200
+#define PWM_FC2 200
+#define PWM_DL1 50000
+
 void commander(void)
 {
     int c = ' ';
 
     c = getch();
+
+    /* Rover manual direction control */
+    switch(c)
+    {
+        case KEY_UP :
+
+            pwm = PWM_FC1;
+            motor_update(M_FWD, pwm, pwm);
+            dir = 'U';
+
+            do{
+                usleep(PWM_DL1);
+            }while(getch() == KEY_UP);
+
+            pwm = 0;
+            motor_update(M_BRK_H, pwm, pwm );
+            dir = 'B';
+
+        break;
+
+        case KEY_DOWN :
+
+            pwm = PWM_FC1;
+            motor_update(M_BWD, pwm, pwm);
+            dir = 'D';
+
+            do{
+                usleep(PWM_DL1);
+            }while(getch() == KEY_DOWN);
+
+            pwm = 0;
+            motor_update(M_BRK_H, pwm, pwm );
+            dir = 'B';
+
+        break;
+
+        case KEY_LEFT :
+
+            pwm = PWM_FC2;
+            motor_update(M_TNL, pwm, pwm);
+            dir = 'L';
+
+            do{
+                usleep(PWM_DL1);
+            }while(getch() == KEY_LEFT);
+
+            pwm = 0;
+            motor_update(M_BRK_H, pwm, pwm );
+            dir = 'B';
+
+        break;
+
+        case KEY_RIGHT :
+
+            pwm = PWM_FC2;
+            motor_update(M_TNR, pwm, pwm);
+            dir = 'R';
+
+            do{
+                usleep(PWM_DL1);
+            }while(getch() == KEY_RIGHT);
+
+            pwm = 0;
+            motor_update(M_BRK_H, pwm, pwm );
+            dir = 'B';
         
-    if (c == KEY_DOWN)
-    {
-        pwm -= 10;
+        break;
 
-        if(pwm < -250)
-            pwm = -250;
-        else if(pwm < 0)
-            motor_update(M_BWD, pwm, pwm);
-        else
-            motor_update(M_FWD, pwm, pwm);
+        case 'S' :
+        case 's' :
 
-        dir = 'D';
+            navi_enabled = TRUE;
+
+        break;
+
+        case 'D' :
+        case 'd' :
+
+            pwm = 0;
+            motor_update(M_BRK_H, pwm, pwm );
+            dir = 'B';
+
+            navi_enabled = FALSE;
+
+        break;
+
+        default :
+
+        break;
     }
-
-    if (c == KEY_UP)
-    {
-        pwm += 10;
-
-        if(pwm > 250)
-            pwm = 250;
-        else if(pwm > 0)
-            motor_update(M_FWD, pwm, pwm);
-        else
-            motor_update(M_BWD, pwm, pwm);
-
-        dir = 'U';
-    }
-
-    if (c == KEY_LEFT)
-    {
-        motor_update(M_TNL, pwm, pwm);
-        dir = 'L';
-    }
-
-    if (c == KEY_RIGHT)
-    {
-        motor_update(M_TNR, pwm, pwm);
-        dir = 'R';
-    }
-
-    if (c == ' ')
-    {
-        pwm = 0;
-        motor_update(M_BRK, pwm, pwm );
-        dir = 'B';
-    }
-
 }
 
 void thread_cmd(void)
@@ -477,28 +642,170 @@ void thread_cmd(void)
     for(;;)
     {
         commander();
-        usleep(10000);
     }
 }
 
-void navigation(void)
-{
 
+
+void navigation(double lon, double lat, double alt)
+{
+    static double lon_old, lat_old, distance, heading;
+    static int index = 0;
+    //unsigned int timeout = (20*60*10);
+
+    lon_old = lon;
+    lat_old = lat;
+
+    heading = atan2((lat - lat_old), (lon - lon_old));
+    distance = calc_distance(lat, lon, wp[index].lat, wp[index].lon, 'K');
+
+    if(((distance * KM2M) > 2.5) && (index < 1))
+    {
+        pwm = PWM_FC1;
+        motor_update(M_FWD, pwm , pwm );
+
+        #if 0
+        if(heading > (_direction + 4))
+        {
+            motor_update(M_TNR, pwm , pwm );
+        }
+        else if(heading < (_direction- 4))
+        {
+            motor_update(M_TNL, pwm , pwm );
+        }
+        #endif
+        dir = 'A';
+    }
+    else
+    {
+        motor_update(M_BRK_H, 0, 0 );
+        index++;
+        dir = 'P';
+    }
 }
 
 void thread_nav(void)
 {
+
     for(;;)
     {
-        navigation();
-        usleep(50000);
+        if((gps_data_curr.fix.mode > MODE_NO_FIX) && (navi_enabled == TRUE))
+        {   
+            navigation(gps_data_curr.fix.longitude,
+                       gps_data_curr.fix.latitude,
+                       gps_data_curr.fix.altitude);
+
+            usleep(GPSD_SAMPLE_RATE);
+        }
     }
 }
+
+void log_create(void)
+{
+    fcsv = fopen("gps.csv", "w+");
+    //chown("gps.csv",getuid(), getgid());
+    chown("gps.csv",RPI_UID, RPI_GID);
+    setbuf(fcsv, fcsv_buf);
+
+    fkml = fopen("gps.kml", "w+");
+    //chown("gps.kml",getuid(), getgid());
+    chown("gps.kml",RPI_UID, RPI_GID);
+    setbuf(fkml, fkml_buf);
+
+    fprintf(fkml, pkml_hs);
+}
+
+void csvlog(double lon, double lat, double alt)
+{
+    fprintf(fcsv,"%10f, %10f, %10f, %10f, %10f, %10f, %f, %f\r\n",
+            lon,
+            lat,
+            lon_filter->mean,
+            lat_filter->mean,
+            lon_kf->x,
+            lat_kf->x,
+            _distance *KM2M,
+            dist_kf->x *KM2M);
+}
+
+void kmllog(double lon, double lat, double alt)
+{
+    fprintf(fkml, pkml_ds);
+    fprintf(fkml, "%.6f, %.6f, %.6f", lon, lat, alt);
+    fprintf(fkml, pkml_de);
+    fprintf(fkml, "\r\n");
+}
+
+void thread_log(void)
+{
+}
+
+const char* send_data_to_yeelink(const char *device,
+        const char *sensor,
+        const char *key,
+        time_t t,
+        float v)
+{
+    static char sbuf[512];
+    char json[64];
+    int jsonlen = 0;
+    #if 0
+    struct tm curtm;
+    t = (t == 0) ? time(NULL) : t;
+
+    (void)localtime_r(&t, &curtm);
+    (void)sprintf(json, "{\"timestamp\":\"%04d-%02d-%02dT%02d:%02d:%02d\","
+            "\"value\":%.2f}",
+            1900 + curtm.tm_year, curtm.tm_mon + 1, curtm.tm_mday, curtm.tm_hour, curtm.tm_min, curtm.tm_sec,
+            v + 0.005f);
+    #else
+    (void)sprintf(json, "{\"value\":%f}", v);
+    #endif
+    jsonlen = strlen(json);
+
+    sprintf(sbuf, pDataPoint, device, sensor, key, jsonlen, json);
+    return sbuf;
+}
+
+/* Xively is the Public Cloud specifically built for the Internet of Things */
+void iot_update(void)
+{
+    static int temp = 0;
+    xi_datapoint_t datapoint;
+
+    /* create the xi library context */
+    xi_context_t* xi_context
+        = xi_create_context(XI_HTTP, XI_API_KEY, XI_FEED_ID );
+
+    xi_set_value_i32( &datapoint, temp++);
+
+    {
+        /*  get actual timestamp */
+        time_t timer = 0;
+        time( &timer );
+        datapoint.timestamp.timestamp = timer;
+    }
+
+    xi_datastream_update( xi_context, XI_FEED_ID, XI_STREAM_ID_1, &datapoint );
+
+    /* destroy the context cause we don't need it anymore */
+    xi_delete_context( xi_context );
+}
+
+void thread_iot(void)
+{
+    for(;;)
+    {
+        iot_update();
+        sleep(1);
+    }
+}
+
 
 void pre_initialize(void)
 {
     int i = 0, rc = FALSE;
-    pthread_t cmd, nav;
+    pthread_t cmd, iot, nav;
 
     (void)signal(SIGINT, signal_handler);
 
@@ -507,6 +814,7 @@ void pre_initialize(void)
         exit(EXIT_FAILURE);
 
     motor_initialize();
+    imu_initialize();
 
     do
     {
@@ -544,10 +852,6 @@ void pre_initialize(void)
 
         lat_kf = kf_create(0.022, 0.617, 0);
 
-        lat_kf->p = 10;
-        lat_kf->q = 0.0001;
-        lat_kf->r = 0.05;
-
         if(NULL == lat_kf)
             break;
 
@@ -555,9 +859,12 @@ void pre_initialize(void)
 
         lon_kf = kf_create(0.022, 0.617, 0);
 
-        lon_kf->p = 10;
-        lon_kf->q = 0.0001;
-        lon_kf->r = 0.05;
+        if(NULL == lon_kf)
+            break;
+
+        i++;
+
+        dist_kf = kf_create(0.00001, 0.999, 0.5);
 
         if(NULL == lon_kf)
             break;
@@ -565,6 +872,11 @@ void pre_initialize(void)
         i++;
 
         if(0 != pthread_create(&cmd,NULL,(void *) thread_cmd,NULL))
+            break;
+
+        i++;
+
+        if(0 != pthread_create(&iot,NULL,(void *) thread_iot,NULL))
             break;
 
         i++;
@@ -581,9 +893,7 @@ void pre_initialize(void)
         exit(EXIT_SUCCESS);
     }
         
-    #ifndef USE_DATA_DUMP
     disp_init();
-    #endif
 
     #ifdef FILTER_PRE_INIT
     for(;;)
@@ -605,10 +915,8 @@ void pre_initialize(void)
             break;
         }
 
-        #ifndef USE_DATA_DUMP
         disp_update(1, 3);
-        #endif
-             
+
         usleep(GPSD_SAMPLE_RATE);
     }
     #endif
@@ -616,7 +924,10 @@ void pre_initialize(void)
 
 int main(int argc, char *argv[])
 {
+    double lon, lat, alt;
     setpriority(PRIO_PROCESS, 0, -5);
+
+    log_create();
 
     /* Pre-Initialization */
     pre_initialize();
@@ -628,32 +939,50 @@ int main(int argc, char *argv[])
             break;
 
         if (gps_data_curr.fix.mode > MODE_NO_FIX)
-        {   
+        {
+            lon = gps_data_curr.fix.longitude;
+            lat = gps_data_curr.fix.latitude;
+            alt = gps_data_curr.fix.altitude;
 
+            /* start timer */
+            gettimeofday(&t1, NULL);
+
+            #if 0
             filter_update(lat_filter, gps_data_curr.fix.latitude);
             filter_update(lon_filter, gps_data_curr.fix.longitude);
 
-            kf_update(lat_kf, gps_data_curr.fix.latitude);
-            kf_update(lon_kf, gps_data_curr.fix.longitude);
+            if(!isnan(gps_data_curr.fix.epy))
+                lat_kf->r = powf(gps_data_curr.fix.epy, 2);
 
-            _distance = distance(lat_kf->x, lon_kf->x, wp[0].lat, wp[0].lon, 'K');
+            kf_update(lat_kf, gps_data_curr.fix.latitude);
+
+            if(!isnan(gps_data_curr.fix.epx))
+                lon_kf->r = powf(gps_data_curr.fix.epx, 2);
+
+            kf_update(lon_kf, gps_data_curr.fix.longitude);
+            #endif
+
+            _distance = calc_distance(lat, lon, wp[0].lat, wp[0].lon, 'K');
+
+            kf_update(dist_kf, _distance);
 
             /* This is a simple approach due to a small distance */
-            _direction = atan2((wp[0].lat - lat_kf->x), (wp[0].lon - lon_kf->x));
+            _direction = atan2((wp[0].lat - lat), (wp[0].lon - lon));
 
-            #ifdef USE_DATA_DUMP
-            printf("%f, %f, %f, %f, %f, %f\r\n", gps_data_curr.fix.latitude,
-                                                 lat_filter->mean,
-                                                 lat_kf->x,
-                                                 gps_data_curr.fix.longitude,
-                                                 lon_filter->mean,
-                                                 lon_kf->x);
-            #endif
+            /* stop timer */
+            gettimeofday(&t2, NULL);
+
+            /* compute and print the elapsed time in millisec */
+            elapsedTime = (t2.tv_sec - t1.tv_sec) * 1000.0;      // sec to ms
+            elapsedTime += (t2.tv_usec - t1.tv_usec);   // ms to us
+            //elapsedTime += (t2.tv_usec - t1.tv_usec) / 1000.0;   // us to ms
+
+            csvlog(lon, lat, alt);
+            kmllog(lon, lat, alt);
+            //navigation(lon, lat, alt);
+
+            disp_update(1, 3);
         }
-
-        #ifndef USE_DATA_DUMP
-        disp_update(1, 3);
-        #endif
 
         usleep(GPSD_SAMPLE_RATE);
 
